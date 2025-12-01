@@ -2,7 +2,8 @@
 
 #ifdef USE_ENCRYPTION
 
-#include <climits> 
+#include <climits>
+#include "targets.h"  // Required for ICACHE_RAM_ATTR platform macro 
 
 #define stringify_literal(x) # x
 #define stringify_expanded(x) stringify_literal(x)

@@ -219,49 +219,77 @@ bool ICACHE_RAM_ATTR isDualRadio()
 #ifdef USE_ENCRYPTION
 extern ChaCha cipher;
 extern uint8_t encryptionCounter[8];
+extern volatile uint8_t OtaNonce;  // Already declared in OTA.h, but needed here
 
 void ICACHE_RAM_ATTR EncryptMsg(uint8_t *output, uint8_t *input)
 {
   size_t packetSize;
+  uint8_t counter[8];
+  uint8_t packets_per_block;
 
   if (OtaIsFullRes)
   {
       packetSize = OTA8_PACKET_SIZE;
+      packets_per_block = 64 / OTA8_PACKET_SIZE;  // 64 / 13 = 4
   }
   else
   {
       packetSize = OTA4_PACKET_SIZE;
+      packets_per_block = 64 / OTA4_PACKET_SIZE;  // 64 / 8 = 8
   }
+
+  // Phase 2 Finding #1 Fix: Derive crypto counter from OtaNonce
+  // OtaNonce increments every timer tick on TX
+  // Multiple packets (4-8) share same ChaCha block
+  // Counter = OtaNonce / packets_per_block
+  memset(counter, 0, 8);
+  counter[0] = OtaNonce / packets_per_block;
+  cipher.setCounter(counter, 8);
+
   cipher.encrypt(output, input, packetSize);
 }
 
 bool ICACHE_RAM_ATTR DecryptMsg(uint8_t *input)
 {
-
   uint8_t decrypted[OTA8_PACKET_SIZE];
   size_t packetSize;
   bool success = false;
-  int resync = 32;
   static bool encryptionStarted = false;
   OTA_Packet_s *otaPktPtr;
   uint8_t oldCrcHigh;
+  uint8_t counter[8];
+  uint8_t packets_per_block;
 
   if (OtaIsFullRes)
   {
       packetSize = OTA8_PACKET_SIZE;
+      packets_per_block = 64 / OTA8_PACKET_SIZE;  // 64 / 13 = 4
   }
   else
   {
       packetSize = OTA4_PACKET_SIZE;
+      packets_per_block = 64 / OTA4_PACKET_SIZE;  // 64 / 8 = 8
   }
 
+  // Phase 2 Finding #1 Fix: RX tracks OtaNonce locally (incremented every timer tick)
+  // Derive expected crypto counter from local OtaNonce
+  // Try small window (±2 blocks) to handle timing jitter and packet loss
+  // Window is in BLOCKS, not packets (much smaller than old ±32 packets)
+  int8_t block_offsets[] = {0, 1, -1, 2, -2};
+  uint8_t expected_counter_base = OtaNonce / packets_per_block;
 
-  do
+  for (int i = 0; i < 5 && !success; i++)
   {
-    EncryptMsg(decrypted, input);
+    uint8_t try_counter = expected_counter_base + block_offsets[i];
 
-    // ValidatePacketCrcStd() changes a byte in the CRC, overwriting it's input.
-    // We will need to save and reset otaPktPtr->std.crcHigh immediately after checking
+    memset(counter, 0, 8);
+    counter[0] = try_counter;
+    cipher.setCounter(counter, 8);
+
+    // Decrypt (ChaCha encrypt is symmetric XOR)
+    cipher.encrypt(decrypted, input, packetSize);
+
+    // Validate CRC
     if (packetSize == OTA4_PACKET_SIZE)
     {
       otaPktPtr = (OTA_Packet_s *) decrypted;
@@ -269,20 +297,27 @@ bool ICACHE_RAM_ATTR DecryptMsg(uint8_t *input)
     }
 
     success = OtaValidatePacketCrc(otaPktPtr);
+
     if (packetSize == OTA4_PACKET_SIZE)
     {
       otaPktPtr->std.crcHigh = oldCrcHigh;
     }
-    encryptionStarted = encryptionStarted || success;
-  } while ( resync-- > 0 && !success );
+
+    if (success)
+    {
+      // Successfully decrypted - we're synchronized
+      break;
+    }
+  }
+
+  encryptionStarted = encryptionStarted || success;
 
   if (success)
   {
-   memcpy(input, decrypted, packetSize);
-   cipher.getCounter(encryptionCounter, 8);
-  // } else if (!encryptionStarted)
-  //  Do not increment counter for invalid packet.
-  } else
+    memcpy(input, decrypted, packetSize);
+    cipher.getCounter(encryptionCounter, 8);
+  }
+  else
   {
     cipher.setCounter(encryptionCounter, 8);
   }
