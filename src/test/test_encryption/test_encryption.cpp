@@ -27,6 +27,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <unity.h>
 
 #ifdef USE_ENCRYPTION
