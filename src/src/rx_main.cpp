@@ -60,7 +60,7 @@
 #else
 #include <avr/pgmspace.h>
 #endif
-ChaCha cipher(12);
+ChaCha cipher(20);  // ChaCha20 - RFC 8439 standard (Finding #5)
 encryptionState_e encryptionStateSend = ENCRYPTION_STATE_NONE;
 uint8_t encryptionCounter[8];
 #endif
@@ -513,8 +513,8 @@ bool CryptoSetKeys(encryption_params_t *params)
     // Decrypt the session key, which is encrypted with the master key
     unsigned char *master_key = (unsigned char *) calloc( keySize + 1, sizeof(char) );
     hexStr2Arr( master_key, stringify_expanded(USE_ENCRYPTION), keySize );
-    DBGLN("encrypted session key = %d, %d, %d, %d", params->key[0], params->key[1], params->key[2], params->key[3]);
-    DBGLN("master_key = %d, %d, %d, %d", master_key[0], master_key[1], master_key[2], master_key[3]);
+    DBGLN_KEY("encrypted session key = %d, %d, %d, %d", params->key[0], params->key[1], params->key[2], params->key[3]);
+    DBGLN_KEY("master_key = %d, %d, %d, %d", master_key[0], master_key[1], master_key[2], master_key[3]);
 
     cipher.clear();
     if ( !cipher.setKey(master_key, keySize) )
@@ -534,7 +534,7 @@ bool CryptoSetKeys(encryption_params_t *params)
     free(master_key);
 
 
-    DBGLN("New key = dec: %d, %d, %d hex:  %x, %x, %x", params->key[0], params->key[1], params->key[2], params->key[3],
+    DBGLN_KEY("New key = dec: %d, %d, %d hex:  %x, %x, %x", params->key[0], params->key[1], params->key[2], params->key[3],
     params->key[4], params->key[5], params->key[6]);
 
     // Further packets are encrypted with the session key

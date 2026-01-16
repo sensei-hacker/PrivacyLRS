@@ -27,7 +27,7 @@
 
 #include <cstdint>
 #include <cstring>
-#include <cstdio>
+#include <stdio.h>
 #include <unity.h>
 
 #ifdef USE_ENCRYPTION
@@ -37,7 +37,7 @@
 #include "OTA.h"
 
 // Define production globals needed for integration tests
-ChaCha cipher(12);
+ChaCha cipher(20);  // ChaCha20 - RFC 8439 standard (Finding #5)
 uint8_t encryptionCounter[8];
 volatile uint8_t OtaNonce = 0;
 bool OtaIsFullRes = false;

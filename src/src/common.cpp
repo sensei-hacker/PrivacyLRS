@@ -224,6 +224,17 @@ bool ICACHE_RAM_ATTR isDualRadio()
 extern ChaCha cipher;
 extern uint8_t encryptionCounter[8];
 
+// Helper function to increment 64-bit counter (little-endian)
+static void incrementCounter(uint8_t *counter)
+{
+  for (int i = 0; i < 8; i++)
+  {
+    counter[i]++;
+    if (counter[i] != 0)
+      break;  // No carry needed
+  }
+}
+
 void ICACHE_RAM_ATTR EncryptMsg(uint8_t *output, uint8_t *input)
 {
   size_t packetSize;
@@ -236,19 +247,24 @@ void ICACHE_RAM_ATTR EncryptMsg(uint8_t *output, uint8_t *input)
   {
       packetSize = OTA4_PACKET_SIZE;
   }
+
+  // Encrypt with current counter
   cipher.encrypt(output, input, packetSize);
+
+  // Explicitly increment counter for next packet
+  incrementCounter(encryptionCounter);
+  cipher.setCounter(encryptionCounter, 8);
 }
 
 bool ICACHE_RAM_ATTR DecryptMsg(uint8_t *input)
 {
-
   uint8_t decrypted[OTA8_PACKET_SIZE];
   size_t packetSize;
   bool success = false;
-  int resync = 32;
   static bool encryptionStarted = false;
   OTA_Packet_s *otaPktPtr;
   uint8_t oldCrcHigh;
+  uint8_t tryCounter[8];
 
   if (OtaIsFullRes)
   {
@@ -259,13 +275,35 @@ bool ICACHE_RAM_ATTR DecryptMsg(uint8_t *input)
       packetSize = OTA4_PACKET_SIZE;
   }
 
+  // Try current expected counter and small lookahead window
+  // Lookahead handles: packet loss, timing jitter, RX starting mid-stream
+  int8_t offsets[] = {0, 1, 2, 3, -1};
 
-  do
+  for (int i = 0; i < 5 && !success; i++)
   {
-    EncryptMsg(decrypted, input);
+    // Calculate trial counter = expected + offset
+    memcpy(tryCounter, encryptionCounter, 8);
+    for (int j = 0; j < offsets[i]; j++)
+      incrementCounter(tryCounter);
 
-    // ValidatePacketCrcStd() changes a byte in the CRC, overwriting it's input.
-    // We will need to save and reset otaPktPtr->std.crcHigh immediately after checking
+    // Handle negative offset
+    if (offsets[i] == -1)
+    {
+      memcpy(tryCounter, encryptionCounter, 8);
+      // Decrement by subtracting 1 (borrow propagation)
+      for (int k = 0; k < 8; k++)
+      {
+        tryCounter[k]--;
+        if (tryCounter[k] != 0xFF)
+          break;  // No borrow needed
+      }
+    }
+
+    // Set cipher to trial counter and decrypt
+    cipher.setCounter(tryCounter, 8);
+    cipher.encrypt(decrypted, input, packetSize);
+
+    // Validate CRC
     if (packetSize == OTA4_PACKET_SIZE)
     {
       otaPktPtr = (OTA_Packet_s *) decrypted;
@@ -273,23 +311,34 @@ bool ICACHE_RAM_ATTR DecryptMsg(uint8_t *input)
     }
 
     success = OtaValidatePacketCrc(otaPktPtr);
+
     if (packetSize == OTA4_PACKET_SIZE)
     {
       otaPktPtr->std.crcHigh = oldCrcHigh;
     }
-    encryptionStarted = encryptionStarted || success;
-  } while ( resync-- > 0 && !success );
+
+    if (success)
+    {
+      // Found correct counter - update expected for next packet
+      memcpy(encryptionCounter, tryCounter, 8);
+      incrementCounter(encryptionCounter);
+      break;
+    }
+  }
+
+  encryptionStarted = encryptionStarted || success;
 
   if (success)
   {
-   memcpy(input, decrypted, packetSize);
-   cipher.getCounter(encryptionCounter, 8);
-  // } else if (!encryptionStarted)
-  //  Do not increment counter for invalid packet.
-  } else
-  {
+    memcpy(input, decrypted, packetSize);
     cipher.setCounter(encryptionCounter, 8);
   }
+  else
+  {
+    // Failed to decrypt - keep current expected counter
+    cipher.setCounter(encryptionCounter, 8);
+  }
+
   return(success);
 }
 

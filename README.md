@@ -14,8 +14,19 @@ RC commands are also encrypted.
 
 ## FAQ
 ### How do the performance and features compare?  
-  Performance and features of PrivacyLRS are identical for the same version number of ELRS, because PrivacyLRS is the exact same code as ELR - just with the packets encrypted.
-  The encryption is much, much faster than the radio link, so there is no measurable delay.
+  Performance and features of PrivacyLRS are identical for the same version number of ELRS, because PrivacyLRS is the exact same code as ELRS - just with the packets encrypted.
+  The encryption is much, much faster than the radio link, so there is no effectively no delay.
+  To put that into hard numbers, at at 250 Hz, that's a minimum of 4 milliseconds between packets (without encryption)
+  ● Time between packets at 250 Hz:
+  - Frequency = 250 packets/second
+  - Time per packet = 1 / 250 = 4 milliseconds
+
+  ChaCha20 encryption Encryption time: 0.00352 milliseconds
+  - Percentage: (0.00352 / 4) × 100 = 0.088%
+
+  So you have 4 milliseconds between each packet, and ChaCha20 encryption only uses 0.00352 milliseconds of that time, which is 0.088% (less
+  than 1/10th of 1 percent).
+
 
 ### How do I use PrivacyLRS?  
   Download the [zip file](https://github.com/sensei-hacker/PrivacyLRS/archive/refs/heads/secure_01.zip) of the secure branch.
@@ -45,7 +56,9 @@ security.
 
 ## About ExpressLRS
 
-ExpressLRS is an open source Radio Link for Radio Control applications. Designed to be the best FPV Racing link, it is based on the fantastic Semtech **SX127x**/**SX1280** LoRa hardware combined with an Espressif or STM32 Processor. Using LoRa modulation as well as reduced packet size it achieves best in class range and latency. It achieves this using a highly optimized over-the-air packet structure, giving simultaneous range and latency advantages. It supports both 900 MHz and 2.4 GHz links, each with their own benefits. 900 MHz supports a maximum of 200 Hz packet rate, with higher penetration. 2.4 GHz supports a blistering fast 1000 Hz on [EdgeTX](http://edgetx.org/). With hundreds of different hardware targets from a wide range of hardware manufacturers, the choice of hardware is constantly growing, with different hardware suited to different requirements.
+
+ExpressLRS is an open source Radio Link for Radio Control applications. Designed to be the best FPV Racing link, it is based on the fantastic Semtech **SX127x**/**SX1280** LoRa hardware combined with an Espressif or STM32 Processor. Using LoRa modulation as well as reduced packet size it achieves best in class range and latency. It achieves this using a highly optimized over-the-air packet structure, giving simultaneous range and latency advantages. It supports both 900 MHz and 2.4 GHz links [also 433 and 868], each with their own benefits. 900 MHz supports a maximum of 200 Hz packet rate, with higher penetration. 2.4 GHz supports a blistering fast 1000 Hz on [EdgeTX](http://edgetx.org/). With over 60 different hardware targets and 13 hardware manufacturers, the choice of hardware is ever growing, with different hardware suited to different requirements.
+
 
 ## Configurator
 To configure your ExpressLRS / PrivacyLRS hardware, the ExpressLRS Configurator can be used, which is found here:
