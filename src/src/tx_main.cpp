@@ -27,6 +27,9 @@
 #include <encryption.h>
 #include <Crypto.h>
 #include <ChaCha.h>
+#include <Curve25519.h>
+#include <SHA256.h>
+#include <HKDF.h>
 #include <string.h>
 #if defined(ESP8266) || defined(ESP32)
 #include <pgmspace.h>
@@ -38,6 +41,9 @@ uint8_t encryptionCounter[8];
 encryptionState_e encryptionStateSend = ENCRYPTION_STATE_NONE;
 encryption_params_t nonce_key;
 uint8_t MSPDataPackage[ELRS_MSP_BUFFER];
+// Ephemeral TX private key and public key (cleared after DH is complete)
+static uint8_t tx_priv[32];
+static uint8_t tx_pub_ecdh[32];
 #else
 uint8_t MSPDataPackage[5];
 #endif
@@ -207,202 +213,80 @@ void ICACHE_RAM_ATTR LinkStatsFromOta(OTA_LinkStats_s * const ls)
 }
 
 #ifdef USE_ENCRYPTION
+// CollectEntropy, generate_dh_keypair, verify_dh_mac, derive_session_key,
+// and apply_session_key are defined in common.cpp.
 
-// TODO test random functions on both RADIO_SX127X and RADIO_SX128X,
-// then delete unused functions.
-#ifdef RADIO_SX127X
-void RandRSSI(uint8_t *outrnd, size_t len)
+// InitCryptoECDH — Phase 1 of the ECDH handshake.
+// Generates an ephemeral Curve25519 key pair, authenticates tx_pub with HMAC-SHA256
+// using the master key, and sends the DH init packet to RX via MSP_ELRS_INIT_ENCRYPT.
+bool InitCryptoECDH()
 {
-  uint8_t rnd;
+    const size_t keySize = 16;
 
-  for (int i = 0; i < len; i++)
-  {
-    Radio.SetMode(SX127x_OPMODE_CAD, SX12XX_Radio_1);
-    rnd = 0;
-    for (uint8_t bit = 0; bit < 8; bit++)
-    {
-        delay(1);
-        rnd |= ( Radio.GetCurrRSSI(SX12XX_Radio_1) & 0x01 ) << bit;
+    // Load 16-byte master key from build flag
+    uint8_t master_key[keySize];
+    hexStr2Arr(master_key, stringify_expanded(USE_ENCRYPTION), keySize);
+
+    // Generate ephemeral key pair
+    generate_dh_keypair(tx_pub_ecdh, tx_priv);
+
+    // Build 48-byte DH handshake packet: pub[32] + HMAC[16]
+    MSPDataPackage[0] = MSP_ELRS_INIT_ENCRYPT;
+    dh_handshake_t *hs = (dh_handshake_t *)&MSPDataPackage[1];
+    memcpy(hs->pub, tx_pub_ecdh, 32);
+    hkdf<SHA256>(hs->mac, 16, master_key, keySize, tx_pub_ecdh, 32, "auth", 4);
+
+    clean(master_key, sizeof(master_key));
+
+    MspSender.SetDataToTransmit(MSPDataPackage, sizeof(dh_handshake_t) + 1);
+    return true;
+}
+
+// ProcessDHResponse — Phase 2 of the ECDH handshake (called on TX when RX response arrives).
+// buf points to the 48 bytes of dh_handshake_t (rx_pub[32] + mac[16]).
+// Returns true on success; on failure the session key is not changed.
+bool ProcessDHResponse(const uint8_t *buf)
+{
+    const size_t keySize = 16;
+    const dh_handshake_t *hs = (const dh_handshake_t *)buf;
+
+    // Verify RX's authentication tag
+    uint8_t master_key[keySize];
+    hexStr2Arr(master_key, stringify_expanded(USE_ENCRYPTION), keySize);
+    bool mac_ok = verify_dh_mac(master_key, keySize, hs->pub, hs->mac);
+    clean(master_key, sizeof(master_key));
+
+    if (!mac_ok) {
+        DBGLN("DH: RX MAC verification failed");
+        clean(tx_priv, sizeof(tx_priv));
+        return false;
     }
-    outrnd[i] = rnd;
-  }
 
-}
-#endif
+    // Compute shared secret: tx_priv is consumed by dh2 (overwritten then destroyed)
+    uint8_t shared[32];
+    memcpy(shared, hs->pub, 32);  // dh2 overwrites its first argument with the shared secret
+    bool dh_ok = Curve25519::dh2(shared, tx_priv);
+    clean(tx_priv, sizeof(tx_priv));  // erase ephemeral private key (forward secrecy)
 
-#ifdef RADIO_SX128X
-void RandRSSI(uint8_t *outrnd, size_t len)
-{
-
-  uint8_t rnd;
-
-  Radio.RXnb(SX1280_MODE_RX_CONT);
-
-  for (int i = 0; i < len; i++)
-  {
-    rnd = 0;
-    for (uint8_t bit = 0; bit < 8; bit++)
-    {
-        delay(1);
-        rnd |= ( Radio.GetRssiInst(SX12XX_Radio_1) & 0x01 ) << bit;
+    if (!dh_ok) {
+        DBGLN("DH: weak-point check failed, aborting");
+        clean(shared, sizeof(shared));
+        return false;
     }
-    outrnd[i] = rnd;
-  }
-}
 
+    // Derive session key from shared secret and both public keys
+    encryption_params_t params;
+    derive_session_key(&params, shared, tx_pub_ecdh, hs->pub);
+    clean(shared, sizeof(shared));
 
-#endif
-
-#ifdef RADIO_LR1121
-void RandRSSI(uint8_t *outrnd, size_t len)
-{
-
-  uint8_t rnd;
-
-  Radio.RXnb(LR1121_MODE_RX_CONT);
-
-  for (int i = 0; i < len; i++)
-  {
-    rnd = 0;
-    for (uint8_t bit = 0; bit < 8; bit++)
-    {
-        delay(1);
-        rnd |= ( Radio.GetRssiInst(SX12XX_Radio_1) & 0x01 ) << bit;
+    // Apply session key to cipher — TX is now ready to encrypt
+    if (!apply_session_key(&params)) {
+        clean(&params, sizeof(params));
+        return false;
     }
-    outrnd[i] = rnd;
-  }
-}
-
-
-#endif
-
-// Fallback when no radio type is defined: RSSI source unavailable, other sources still used.
-#if !defined(RADIO_SX127X) && !defined(RADIO_SX128X) && !defined(RADIO_LR1121)
-#warning "No radio defined: RSSI entropy source unavailable, crypto entropy is degraded"
-static void RandRSSI(uint8_t *outrnd, size_t len) { memset(outrnd, 0, len); }
-#endif
-
-// CollectEntropy - gather entropy from multiple sources and condition via ChaCha20.
-//
-// Sources are XOR-mixed into a 32-byte accumulator (ChaCha20 key size), then
-// ChaCha20 conditions the output. Sources that are unavailable are skipped safely.
-void CollectEntropy(uint8_t *outrnd, size_t len)
-{
-  // 32-byte accumulator = full ChaCha20 key size; zero-initialized so XOR is safe
-  // even if some sources are unavailable.
-  uint8_t raw[32] = {0};
-
-  // Source 1: RSSI noise (radio-specific analog noise)
-  RandRSSI(raw, sizeof(raw));
-
-  // Source 2: Hardware RNG (ESP32 family on-chip TRNG - high quality)
-#if defined(PLATFORM_ESP32) || defined(PLATFORM_ESP32_S3) || defined(PLATFORM_ESP32_C3)
-  for (size_t i = 0; i < sizeof(raw); )
-  {
-    uint32_t hw = esp_random();
-    for (int b = 0; b < 4 && i < sizeof(raw); b++, i++)
-      raw[i] ^= (uint8_t)(hw >> (b * 8));
-  }
-#endif
-
-  // ChaCha20-based entropy conditioning: same construction as Linux kernel CRNG (v5.17+).
-  // Entropy is used as the ChaCha20 key; encrypting zeros yields the keystream,
-  // which is computationally indistinguishable from uniform random under PRF security.
-  const uint8_t zeros[32] = {0};  // all-zero nonce + plaintext
-  ChaCha kdf(20);
-  kdf.setKey(raw, sizeof(raw));
-  kdf.setIV(zeros, 8);            // all-zero nonce is safe for KDF (key is unique each call)
-  kdf.encrypt(outrnd, zeros, len);
-
-  // Clear raw entropy accumulator from stack
-  memset(raw, 0, sizeof(raw));
-}
-
-/*
-Not used because it may return 0 on some hardware - kept for future reference if needed.
-uint32_t GetRandom32t()
-{
-  uint32_t rnd = 0;
-#ifdef RADIO_SX128X
-  Radio.RXnb(SX1280_MODE_RX_CONT);
-#endif
-#ifdef RADIO_LR1121
-  Radio.RXnb(LR1121_MODE_RX_CONT);
-#endif
-#ifdef RADIO_SX127X
-  // Radio.ConfigLoraDefaults();
-  Radio.SetRxTimeoutUs(0); // Sets continuous receive mode
-  Radio.RXnb();
-#endif
-
-  for( int i = 0; i < 32; i++ )
-  {
-    delay(1);
-    // REG_LR_RSSIWIDEBAND and SX1272Read not defined at this scope
-    // Unfiltered RSSI value reading. Only takes the least sitgnificant bit
-    // rnd |= ( ( uint32_t )SX1272Read( REG_LR_RSSIWIDEBAND ) & 0x01 ) << i;
-  }
-  return rnd;
-}
-*/
-
-
-bool InitCrypto()
-{
-
-  encryption_params_t *enc_params;
-  uint8_t rounds = 12;
-  size_t counterSize = 8;
-  size_t keySize = 16;
-
-  uint8_t counter[] = {109, 110, 111, 112, 113, 114, 115, 116};
-
-  memcpy(encryptionCounter, counter, counterSize);
-  cipher.clear();
-
-  unsigned char *master_key = (unsigned char *) calloc( keySize + 1, sizeof(char) );
-  hexStr2Arr( master_key, stringify_expanded(USE_ENCRYPTION), keySize );
-
-  cipher.setNumRounds(rounds);
-  if ( !cipher.setKey(master_key, keySize) )
-  {
-      return false;
-  }
-  if ( !cipher.setIV(nonce_key.nonce, cipher.ivSize()) )
-  {
-      return false;
-  }
-  if (!cipher.setCounter(counter, counterSize))
-  {
-      return false;
-  }
-
-  // Encrypt the session key and send it
-  MSPDataPackage[0] = MSP_ELRS_INIT_ENCRYPT;
-  enc_params = (encryption_params_t *) &MSPDataPackage[1];
-  memcpy( enc_params->nonce, nonce_key.nonce, cipher.ivSize() );
-  memcpy( enc_params->key, nonce_key.key, keySize );
-
-  cipher.encrypt(enc_params->key, enc_params->key, keySize);
-  free(master_key);
-
-  MspSender.SetDataToTransmit(MSPDataPackage, sizeof(encryption_params_t) + 1);
-
-  // Further packets are encrypted with the session key
-  if ( !cipher.setKey(nonce_key.key, keySize) )
-  {
-      return false;
-  }
-  if ( !cipher.setIV(nonce_key.nonce, cipher.ivSize()) )
-  {
-      return false;
-  }
-  if (!cipher.setCounter(counter, counterSize))
-  {
-      return false;
-  }
-
-  return true;
+    clean(&params, sizeof(params));
+    DBGLN("DH: session key established (TX)");
+    return true;
 }
 #endif
 
@@ -1769,6 +1653,26 @@ void loop()
 
   if (TelemetryReceiver.HasFinishedData())
   {
+#ifdef USE_ENCRYPTION
+      if (CRSFinBuffer[0] == MSP_ELRS_DH_RESPONSE)
+      {
+        // RX sent its Curve25519 public key + MAC — complete the ECDH handshake
+        if (encryptionStateSend == ENCRYPTION_STATE_DH_SENT)
+        {
+          if (ProcessDHResponse(CRSFinBuffer + 1))
+          {
+            encryptionStateSend = ENCRYPTION_STATE_FULL;
+            DBGLN("ECDH handshake complete");
+          }
+          else
+          {
+            DBGLN("ECDH handshake FAILED — bad MAC or DH error");
+            encryptionStateSend = ENCRYPTION_STATE_NONE; // retry
+          }
+        }
+      }
+      else
+#endif
       if (CRSFinBuffer[0] == CRSF_ADDRESS_USB)
       {
         if (config.GetLinkMode() == TX_MAVLINK_MODE)
@@ -1800,15 +1704,11 @@ void loop()
   if ( (connectionState == connected) && (!MspSender.IsActive()) )
   {
     if (encryptionStateSend == ENCRYPTION_STATE_NONE)
-	{
-      InitCrypto();
-      encryptionStateSend = ENCRYPTION_STATE_PROPOSED;
+    {
+      InitCryptoECDH();
+      encryptionStateSend = ENCRYPTION_STATE_DH_SENT;
     }
-	  else if (encryptionStateSend == ENCRYPTION_STATE_PROPOSED )
-	  {
-        // MspSender.IsActive() will be true until our proposal msg is ack'ed
-        encryptionStateSend = ENCRYPTION_STATE_FULL;
-	  }
+    // DH_SENT: waiting for RX DH response — handled in TelemetryReceiver block above
   }
 #endif
 

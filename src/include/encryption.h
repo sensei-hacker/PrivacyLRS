@@ -33,10 +33,11 @@
 #endif
 
 typedef enum : uint8_t {
-	ENCRYPTION_STATE_NONE,
-  ENCRYPTION_STATE_PROPOSED,
-  ENCRYPTION_STATE_FULL,
-	ENCRYPTION_STATE_DISABLED
+    ENCRYPTION_STATE_NONE,
+    ENCRYPTION_STATE_DH_SENT,   // TX has sent DH init, waiting for RX response
+    ENCRYPTION_STATE_PROPOSED,  // Legacy: used during DH response processing
+    ENCRYPTION_STATE_FULL,
+    ENCRYPTION_STATE_DISABLED
 } encryptionState_e;
 
 typedef struct encryption_params_s
@@ -46,8 +47,29 @@ typedef struct encryption_params_s
 
 } encryption_params_t;
 
+// DH handshake packet (48 bytes): Curve25519 public key + 16-byte HMAC-SHA256 auth tag.
+// Sent by both TX (MSP_ELRS_INIT_ENCRYPT) and RX (MSP_ELRS_DH_RESPONSE).
+typedef struct dh_handshake_s
+{
+    uint8_t pub[32];  // Curve25519 ephemeral public key
+    uint8_t mac[16];  // HKDF-SHA256(master_key, pub, "auth")[0:16]
+} dh_handshake_t;    // 48 bytes total
+
 bool ICACHE_RAM_ATTR DecryptMsg(uint8_t *input);
 void ICACHE_RAM_ATTR EncryptMsg(uint8_t *input, uint8_t *output);
+
+// Entropy collection — defined in common.cpp, callable from TX and RX
+void CollectEntropy(uint8_t *outrnd, size_t len);
+
+// ECDH helpers — defined in common.cpp
+void generate_dh_keypair(uint8_t pub[32], uint8_t priv[32]);
+void compute_dh_mac(uint8_t mac[16], const uint8_t *master_key,
+                    size_t master_key_len, const uint8_t pub[32]);
+bool verify_dh_mac(const uint8_t *master_key, size_t master_key_len,
+                   const uint8_t pub[32], const uint8_t mac[16]);
+void derive_session_key(encryption_params_t *params, const uint8_t shared[32],
+                        const uint8_t tx_pub[32], const uint8_t rx_pub[32]);
+bool apply_session_key(encryption_params_t *params);
 
 /// in: valid chars are 0-9 + A-F + a-f
 /// out_len_max==0: convert until the end of input string, out_len_max>0 only convert this many numbers

@@ -5,7 +5,13 @@
 #include <encryption.h>
 #include <Crypto.h>
 #include <ChaCha.h>
+#include <Curve25519.h>
+#include <SHA256.h>
+#include <HKDF.h>
 #include <string.h>
+#if defined(PLATFORM_ESP32) || defined(PLATFORM_ESP32_S3) || defined(PLATFORM_ESP32_C3)
+#include <esp_system.h>
+#endif
 #if defined(ESP8266) || defined(ESP32)
 #include <pgmspace.h>
 #else
@@ -220,7 +226,142 @@ bool ICACHE_RAM_ATTR isDualRadio()
     return GPIO_PIN_NSS_2 != UNDEF_PIN;
 }
 
+// -----------------------------------------------------------------------
+// Entropy and ECDH helpers — used by both TX and RX
+// -----------------------------------------------------------------------
 #ifdef USE_ENCRYPTION
+
+// Radio-based RSSI entropy sources (one per radio type)
+#ifdef RADIO_SX127X
+static void RandRSSI(uint8_t *outrnd, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        Radio.SetMode(SX127x_OPMODE_CAD, SX12XX_Radio_1);
+        uint8_t rnd = 0;
+        for (uint8_t bit = 0; bit < 8; bit++) {
+            delay(1);
+            rnd |= (Radio.GetCurrRSSI(SX12XX_Radio_1) & 0x01) << bit;
+        }
+        outrnd[i] = rnd;
+    }
+}
+#endif
+
+#ifdef RADIO_SX128X
+static void RandRSSI(uint8_t *outrnd, size_t len)
+{
+    Radio.RXnb(SX1280_MODE_RX_CONT);
+    for (size_t i = 0; i < len; i++) {
+        uint8_t rnd = 0;
+        for (uint8_t bit = 0; bit < 8; bit++) {
+            delay(1);
+            rnd |= (Radio.GetRssiInst(SX12XX_Radio_1) & 0x01) << bit;
+        }
+        outrnd[i] = rnd;
+    }
+}
+#endif
+
+#ifdef RADIO_LR1121
+static void RandRSSI(uint8_t *outrnd, size_t len)
+{
+    Radio.RXnb(LR1121_MODE_RX_CONT);
+    for (size_t i = 0; i < len; i++) {
+        uint8_t rnd = 0;
+        for (uint8_t bit = 0; bit < 8; bit++) {
+            delay(1);
+            rnd |= (Radio.GetRssiInst(SX12XX_Radio_1) & 0x01) << bit;
+        }
+        outrnd[i] = rnd;
+    }
+}
+#endif
+
+#if !defined(RADIO_SX127X) && !defined(RADIO_SX128X) && !defined(RADIO_LR1121)
+#warning "No radio defined: RSSI entropy source unavailable, crypto entropy is degraded"
+static void RandRSSI(uint8_t *outrnd, size_t len) { memset(outrnd, 0, len); }
+#endif
+
+// CollectEntropy - gather entropy from multiple hardware sources and condition
+// via ChaCha20 (same construction as Linux kernel CRNG v5.17+).
+void CollectEntropy(uint8_t *outrnd, size_t len)
+{
+    uint8_t raw[32] = {0};
+    RandRSSI(raw, sizeof(raw));  // Source 1: RSSI noise from radio analog front-end
+#if defined(PLATFORM_ESP32) || defined(PLATFORM_ESP32_S3) || defined(PLATFORM_ESP32_C3)
+    for (size_t i = 0; i < sizeof(raw); ) {
+        uint32_t hw = esp_random();
+        for (int b = 0; b < 4 && i < sizeof(raw); b++, i++)
+            raw[i] ^= (uint8_t)(hw >> (b * 8));
+    }
+#endif
+    const uint8_t zeros[32] = {0};
+    ChaCha kdf(20);
+    kdf.setKey(raw, sizeof(raw));
+    kdf.setIV(zeros, 8);
+    kdf.encrypt(outrnd, zeros, len);
+    clean(raw, sizeof(raw));
+}
+
+// Generate a Curve25519 ephemeral key pair using CollectEntropy().
+// pub[32] = public key (to send to peer), priv[32] = private key (keep secret).
+void generate_dh_keypair(uint8_t pub[32], uint8_t priv[32])
+{
+    CollectEntropy(priv, 32);
+    priv[0] &= 0xF8;                        // RFC 7748 clamping
+    priv[31] = (priv[31] & 0x7F) | 0x40;
+    Curve25519::eval(pub, priv, nullptr);   // pub = priv * base_point(9)
+}
+
+// Compute 16-byte HKDF-SHA256 authentication tag over pub using master_key.
+void compute_dh_mac(uint8_t mac[16], const uint8_t *master_key,
+                    size_t master_key_len, const uint8_t pub[32])
+{
+    hkdf<SHA256>(mac, 16, master_key, master_key_len, pub, 32, "auth", 4);
+}
+
+// Verify authentication tag; returns true if valid (constant-time comparison).
+bool verify_dh_mac(const uint8_t *master_key, size_t master_key_len,
+                   const uint8_t pub[32], const uint8_t mac[16])
+{
+    uint8_t expected[16];
+    compute_dh_mac(expected, master_key, master_key_len, pub);
+    bool ok = secure_compare(expected, mac, 16);
+    clean(expected, sizeof(expected));
+    return ok;
+}
+
+// Derive session key and nonce from ECDH shared secret and both public keys.
+// Fills params->key[16] and params->nonce[8].
+void derive_session_key(encryption_params_t *params, const uint8_t shared[32],
+                        const uint8_t tx_pub[32], const uint8_t rx_pub[32])
+{
+    uint8_t salt[64];
+    memcpy(salt,      tx_pub, 32);
+    memcpy(salt + 32, rx_pub, 32);
+    uint8_t session_material[24];
+    hkdf<SHA256>(session_material, 24, shared, 32, salt, 64, "privacylrs-v1", 13);
+    memcpy(params->key,   session_material,      16);
+    memcpy(params->nonce, session_material + 16,  8);
+    clean(session_material, sizeof(session_material));
+    clean(salt, sizeof(salt));
+}
+
+// Apply encryption_params_t to the global cipher (same setup for both TX and RX).
+bool apply_session_key(encryption_params_t *params)
+{
+    uint8_t counter[] = {109, 110, 111, 112, 113, 114, 115, 116};
+    memcpy(encryptionCounter, counter, 8);
+    cipher.clear();
+    if (!cipher.setKey(params->key, 16))            return false;
+    if (!cipher.setIV(params->nonce, cipher.ivSize())) return false;
+    if (!cipher.setCounter(counter, 8))             return false;
+    cipher.setNumRounds(12);
+    return true;
+}
+
+// -----------------------------------------------------------------------
+
 extern ChaCha cipher;
 extern uint8_t encryptionCounter[8];
 

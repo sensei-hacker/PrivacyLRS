@@ -53,6 +53,9 @@
 #include <encryption.h>
 #include <Crypto.h>
 #include <ChaCha.h>
+#include <Curve25519.h>
+#include <SHA256.h>
+#include <HKDF.h>
 #include <string.h>
 
 #if defined(ESP8266) || defined(ESP32)
@@ -63,6 +66,9 @@
 ChaCha cipher(20);  // ChaCha20 - RFC 8439 standard (Finding #5)
 encryptionState_e encryptionStateSend = ENCRYPTION_STATE_NONE;
 uint8_t encryptionCounter[8];
+// DH response buffer: [MSP_ELRS_DH_RESPONSE] + {rx_pub[32] + rx_mac[16]}
+static uint8_t dh_response_buf[1 + sizeof(dh_handshake_t)];
+static bool dh_response_pending = false;
 #endif
 //
 // Code encapsulated by the ARDUINO_CORE_INVERT_FIX #ifdef temporarily fixes EpressLRS issue #2609 which is caused
@@ -501,58 +507,63 @@ void ICACHE_RAM_ATTR LinkStatsToOta(OTA_LinkStats_s * const ls)
 
 #ifdef USE_ENCRYPTION
 
-bool CryptoSetKeys(encryption_params_t *params)
+// ECDH key exchange on RX side.
+// payload points to the 48-byte dh_handshake_t from MSP_ELRS_INIT_ENCRYPT.
+// On success: derives session key, applies it, queues DH response, returns true.
+bool CryptoSetKeysECDH(const uint8_t *payload)
 {
-    uint8_t rounds = 12;
-    size_t counterSize = 8;
-    size_t keySize = 16;
+    const dh_handshake_t *tx_hs = (const dh_handshake_t *)payload;
+    const size_t keySize = 16;
 
-    uint8_t counter[]     = {109, 110, 111, 112, 113, 114, 115, 116};
-
-
-    // Decrypt the session key, which is encrypted with the master key
-    unsigned char *master_key = (unsigned char *) calloc( keySize + 1, sizeof(char) );
-    hexStr2Arr( master_key, stringify_expanded(USE_ENCRYPTION), keySize );
-    DBGLN_KEY("encrypted session key = %d, %d, %d, %d", params->key[0], params->key[1], params->key[2], params->key[3]);
-    DBGLN_KEY("master_key = %d, %d, %d, %d", master_key[0], master_key[1], master_key[2], master_key[3]);
-
-    cipher.clear();
-    if ( !cipher.setKey(master_key, keySize) )
+    // Verify TX's authentication tag using the pre-shared master key
+    uint8_t master_key[keySize];
+    hexStr2Arr(master_key, stringify_expanded(USE_ENCRYPTION), keySize);
+    bool mac_ok = verify_dh_mac(master_key, keySize, tx_hs->pub, tx_hs->mac);
+    if (!mac_ok)
     {
+        clean(master_key, sizeof(master_key));
+        DBGLN("ECDH: TX MAC verification failed");
         return false;
     }
-    if ( !cipher.setIV(params->nonce, cipher.ivSize()) )
-    {
-        return false;
-    }
-    if (!cipher.setCounter(counter, counterSize))
-    {
-        return false;
-    }
-    cipher.setNumRounds(rounds);
-    cipher.decrypt(params->key, params->key, keySize);
-    free(master_key);
 
+    // Generate RX ephemeral key pair
+    uint8_t rx_priv[32];
+    uint8_t rx_pub[32];
+    generate_dh_keypair(rx_pub, rx_priv);
 
-    DBGLN_KEY("New key = dec: %d, %d, %d hex:  %x, %x, %x", params->key[0], params->key[1], params->key[2], params->key[3],
-    params->key[4], params->key[5], params->key[6]);
+    // Compute shared secret: dh2 overwrites shared[] with DH result, destroys rx_priv
+    uint8_t shared[32];
+    memcpy(shared, tx_hs->pub, 32);
+    bool dh_ok = Curve25519::dh2(shared, rx_priv);
+    clean(rx_priv, sizeof(rx_priv));  // Forward secrecy: erase ephemeral private key
+    if (!dh_ok)
+    {
+        clean(shared, sizeof(shared));
+        clean(master_key, sizeof(master_key));
+        return false;
+    }
 
-    // Further packets are encrypted with the session key
-    memcpy(encryptionCounter, counter, counterSize);
-    cipher.clear();
-    if ( !cipher.setKey(params->key, keySize) )
+    // Derive and apply session key (same tx_pub/rx_pub order as TX side)
+    encryption_params_t params;
+    derive_session_key(&params, shared, tx_hs->pub, rx_pub);
+    clean(shared, sizeof(shared));
+
+    if (!apply_session_key(&params))
     {
+        clean(&params, sizeof(params));
+        clean(master_key, sizeof(master_key));
         return false;
     }
-    if ( !cipher.setIV(params->nonce, cipher.ivSize()) )
-    {
-        return false;
-    }
-    if (!cipher.setCounter(counter, counterSize))
-    {
-        return false;
-    }
-    cipher.setNumRounds(rounds);
+    clean(&params, sizeof(params));
+
+    // Build DH response: [MSP_ELRS_DH_RESPONSE] + {rx_pub[32] + rx_mac[16]}
+    dh_response_buf[0] = MSP_ELRS_DH_RESPONSE;
+    dh_handshake_t *rx_hs = (dh_handshake_t *)&dh_response_buf[1];
+    memcpy(rx_hs->pub, rx_pub, 32);
+    compute_dh_mac(rx_hs->mac, master_key, keySize, rx_pub);
+    clean(master_key, sizeof(master_key));
+
+    dh_response_pending = true;
     return true;
 }
 
@@ -1351,13 +1362,18 @@ void MspReceiveComplete()
         break;
 
 #ifdef USE_ENCRYPTION
-	case MSP_ELRS_INIT_ENCRYPT:
-        DBGLN("MspData = %d, %d, %d, %d, %d, %d", MspData[1], MspData[2], MspData[3], MspData[4], MspData[5], MspData[6]);
-
-	    encryption_params = (encryption_params_t *) &MspData[1];
-		CryptoSetKeys(encryption_params);
-		encryptionStateSend = ENCRYPTION_STATE_FULL;
-		break;
+    case MSP_ELRS_INIT_ENCRYPT:
+        // MspData[1..48] = dh_handshake_t {tx_pub[32] + tx_mac[16]}
+        if (CryptoSetKeysECDH(&MspData[1]))
+        {
+            encryptionStateSend = ENCRYPTION_STATE_FULL;
+            DBGLN("ECDH: session key derived, DH response queued");
+        }
+        else
+        {
+            DBGLN("ECDH: handshake failed");
+        }
+        break;
 #endif
 
     case MSP_ELRS_MAVLINK_TLM: // 0xFD
@@ -2359,6 +2375,15 @@ void loop()
 
     uint8_t *nextPayload = 0;
     uint8_t nextPlayloadSize = 0;
+#ifdef USE_ENCRYPTION
+    // Priority: send DH response before normal telemetry
+    if (dh_response_pending && !TelemetrySender.IsActive())
+    {
+        TelemetrySender.SetDataToTransmit(dh_response_buf, sizeof(dh_response_buf));
+        dh_response_pending = false;
+    }
+    else
+#endif
     if (!TelemetrySender.IsActive() && telemetry.GetNextPayload(&nextPlayloadSize, &nextPayload))
     {
         TelemetrySender.SetDataToTransmit(nextPayload, nextPlayloadSize);
