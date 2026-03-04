@@ -32,6 +32,7 @@
 #define MSP_ELRS_POWER_CALI_SET             0x21
 
 #define MSP_ELRS_INIT_ENCRYPT               0x55
+#define MSP_ELRS_DH_RESPONSE                0x56  // RX → TX: Curve25519 DH public key + MAC
 #define MSP_ELRS_MAVLINK_TLM                0xFD
 
 #define MSP_ELRS_BACKPACK_CONFIG            0x30
