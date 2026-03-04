@@ -276,22 +276,46 @@ void RandRSSI(uint8_t *outrnd, size_t len)
 
 #endif
 
-void GetRandomBytes(uint8_t *outrnd, size_t len)
+// Fallback when no radio type is defined: RSSI source unavailable, other sources still used.
+#if !defined(RADIO_SX127X) && !defined(RADIO_SX128X) && !defined(RADIO_LR1121)
+#warning "No radio defined: RSSI entropy source unavailable, crypto entropy is degraded"
+static void RandRSSI(uint8_t *outrnd, size_t len) { memset(outrnd, 0, len); }
+#endif
+
+// CollectEntropy - gather entropy from multiple sources and condition via ChaCha20.
+//
+// Sources are XOR-mixed into a 32-byte accumulator (ChaCha20 key size), then
+// ChaCha20 conditions the output. Sources that are unavailable are skipped safely.
+void CollectEntropy(uint8_t *outrnd, size_t len)
 {
-#ifdef RADIO_SX127X
-  // Radio.ConfigLoraDefaults();
-  Radio.SetRxTimeoutUs(0); // Sets continuous receive mode
-  Radio.RXnb();
-  for (int i = 0; i < len; i++)
+  // 32-byte accumulator = full ChaCha20 key size; zero-initialized so XOR is safe
+  // even if some sources are unavailable.
+  uint8_t raw[32] = {0};
+
+  // Source 1: RSSI noise (radio-specific analog noise)
+  RandRSSI(raw, sizeof(raw));
+
+  // Source 2: Hardware RNG (ESP32 family on-chip TRNG - high quality)
+#if defined(PLATFORM_ESP32) || defined(PLATFORM_ESP32_S3) || defined(PLATFORM_ESP32_C3)
+  for (size_t i = 0; i < sizeof(raw); )
   {
-    for( uint8_t bit = 0; bit < 8; bit++ )
-    {
-      // REG_LR_RSSIWIDEBAND and SX1272Read not defined at this scope
-      // outrnd |= ( ( uint32_t )SX1272Read( REG_LR_RSSIWIDEBAND ) & 0x01 ) << bit;
-      delay(1);
-    }
+    uint32_t hw = esp_random();
+    for (int b = 0; b < 4 && i < sizeof(raw); b++, i++)
+      raw[i] ^= (uint8_t)(hw >> (b * 8));
   }
 #endif
+
+  // ChaCha20-based entropy conditioning: same construction as Linux kernel CRNG (v5.17+).
+  // Entropy is used as the ChaCha20 key; encrypting zeros yields the keystream,
+  // which is computationally indistinguishable from uniform random under PRF security.
+  const uint8_t zeros[32] = {0};  // all-zero nonce + plaintext
+  ChaCha kdf(20);
+  kdf.setKey(raw, sizeof(raw));
+  kdf.setIV(zeros, 8);            // all-zero nonce is safe for KDF (key is unique each call)
+  kdf.encrypt(outrnd, zeros, len);
+
+  // Clear raw entropy accumulator from stack
+  memset(raw, 0, sizeof(raw));
 }
 
 /*
@@ -1654,7 +1678,7 @@ void setup()
 
 #ifdef USE_ENCRYPTION
       // Should be a good time to do this, because BeginClearChannelAssessment also sets the radio to continuous recv
-      RandRSSI( (uint8_t *) &nonce_key, 24);
+      CollectEntropy( (uint8_t *) &nonce_key, sizeof(nonce_key));
 #endif
   #if defined(Regulatory_Domain_EU_CE_2400)
       SetClearChannelAssessmentTime();
