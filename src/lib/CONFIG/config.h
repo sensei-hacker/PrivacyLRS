@@ -118,6 +118,12 @@ public:
     uint8_t GetLinkMode() const { return m_model->linkMode; }
     bool GetModelMatch() const { return m_model->modelMatch; }
     bool     IsModified() const { return m_modified; }
+#if defined(USE_ENCRYPTION)
+    // Advances and saves the TX boot count, returning the new value
+    uint16_t NextCryptoBootCount();
+    // Saves a new boot count with the next commit
+    void SetCryptoBootCount(uint16_t bootCount);
+#endif
     uint8_t  GetVtxBand() const { return m_config.vtxBand; }
     uint8_t  GetVtxChannel() const { return m_config.vtxChannel; }
     uint8_t  GetVtxPower() const { return m_config.vtxPower; }
@@ -177,6 +183,11 @@ private:
     uint8_t     m_modified;
     model_config_t *m_model;
     uint8_t     m_modelId;
+#if defined(USE_ENCRYPTION)
+    uint16_t    m_cryptoBootCount = 0;
+    bool        m_cryptoBootCountModified = false;
+    void        WriteCryptoBootCount();
+#endif
 #if defined(PLATFORM_ESP32)
     nvs_handle  handle;
 #endif

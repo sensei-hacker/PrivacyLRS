@@ -48,22 +48,10 @@
 #include "esp_task_wdt.h"
 #endif
 
-
 #ifdef USE_ENCRYPTION
-#include <encryption.h>
-#include <Crypto.h>
-#include <ChaCha.h>
-#include <string.h>
+#include "OtaCrypto.h"
+#endif
 
-#if defined(ESP8266) || defined(ESP32)
-#include <pgmspace.h>
-#else
-#include <avr/pgmspace.h>
-#endif
-ChaCha cipher(20);  // ChaCha20 - RFC 8439 standard (Finding #5)
-encryptionState_e encryptionStateSend = ENCRYPTION_STATE_NONE;
-uint8_t encryptionCounter[8];
-#endif
 //
 // Code encapsulated by the ARDUINO_CORE_INVERT_FIX #ifdef temporarily fixes EpressLRS issue #2609 which is caused
 // by the Arduino core (see https://github.com/espressif/arduino-esp32/issues/9896) and fixed
@@ -499,65 +487,6 @@ void ICACHE_RAM_ATTR LinkStatsToOta(OTA_LinkStats_s * const ls)
 }
 
 
-#ifdef USE_ENCRYPTION
-
-bool CryptoSetKeys(encryption_params_t *params)
-{
-    uint8_t rounds = 12;
-    size_t counterSize = 8;
-    size_t keySize = 16;
-
-    uint8_t counter[]     = {109, 110, 111, 112, 113, 114, 115, 116};
-
-
-    // Decrypt the session key, which is encrypted with the master key
-    unsigned char *master_key = (unsigned char *) calloc( keySize + 1, sizeof(char) );
-    hexStr2Arr( master_key, stringify_expanded(USE_ENCRYPTION), keySize );
-    DBGLN_KEY("encrypted session key = %d, %d, %d, %d", params->key[0], params->key[1], params->key[2], params->key[3]);
-    DBGLN_KEY("master_key = %d, %d, %d, %d", master_key[0], master_key[1], master_key[2], master_key[3]);
-
-    cipher.clear();
-    if ( !cipher.setKey(master_key, keySize) )
-    {
-        return false;
-    }
-    if ( !cipher.setIV(params->nonce, cipher.ivSize()) )
-    {
-        return false;
-    }
-    if (!cipher.setCounter(counter, counterSize))
-    {
-        return false;
-    }
-    cipher.setNumRounds(rounds);
-    cipher.decrypt(params->key, params->key, keySize);
-    free(master_key);
-
-
-    DBGLN_KEY("New key = dec: %d, %d, %d hex:  %x, %x, %x", params->key[0], params->key[1], params->key[2], params->key[3],
-    params->key[4], params->key[5], params->key[6]);
-
-    // Further packets are encrypted with the session key
-    memcpy(encryptionCounter, counter, counterSize);
-    cipher.clear();
-    if ( !cipher.setKey(params->key, keySize) )
-    {
-        return false;
-    }
-    if ( !cipher.setIV(params->nonce, cipher.ivSize()) )
-    {
-        return false;
-    }
-    if (!cipher.setCounter(counter, counterSize))
-    {
-        return false;
-    }
-    cipher.setNumRounds(rounds);
-    return true;
-}
-
-#endif
-
 bool ICACHE_RAM_ATTR HandleSendTelemetryResponse()
 {
     uint8_t modresult = (OtaNonce + 1) % ExpressLRS_currTlmDenom;
@@ -667,10 +596,7 @@ bool ICACHE_RAM_ATTR HandleSendTelemetryResponse()
 
 
 #ifdef USE_ENCRYPTION
-    if (encryptionStateSend == ENCRYPTION_STATE_FULL)
-    {
-      EncryptMsg( (uint8_t*)&otaPkt, (uint8_t*)&otaPkt );
-    }
+    OtaCrypto.apply((uint8_t *)&otaPkt, ExpressLRS_currAirRate_Modparams->PayloadLength, OTA_CRYPTO_DOWNLINK, OtaNonce);
 #endif
 
     Radio.TXnb((uint8_t*)&otaPkt, ExpressLRS_currAirRate_Modparams->PayloadLength, transmittingRadio);
@@ -775,6 +701,12 @@ void ICACHE_RAM_ATTR HWtimerCallbackTick() // this is 180 out of phase with the 
 {
     updatePhaseLock();
     OtaNonce++;
+#ifdef USE_ENCRYPTION
+    if (OtaNonce == 0)
+    {
+        OtaCrypto.onNonceWrapped();
+    }
+#endif
 
     // if (!alreadyTLMresp && !alreadyFHSS && !LQCalc.currentIsSet()) // packet timeout AND didn't DIDN'T just hop or send TLM
     // {
@@ -1150,6 +1082,19 @@ static void ICACHE_RAM_ATTR updateSwitchModePendingFromOta(uint8_t newSwitchMode
 
 static bool ICACHE_RAM_ATTR ProcessRfPacket_SYNC(uint32_t const now, OTA_Sync_s const * const otaSync)
 {
+#ifdef USE_ENCRYPTION
+    // UID3 and UID4 carry the encryption counter instead, and the top bit of UID5 says which
+    // part of it. The UID is still checked by the CRC, as UID4 and UID5 seed OtaCrcInitializer.
+    const uint8_t uidCheckMask = (uint8_t)~(MODELMATCH_MASK | OTA_SYNC_CRYPTO_FIELD_BIT);
+    if ((otaSync->UID5 & uidCheckMask) != (UID[5] & uidCheckMask))
+        return false;
+
+    if (!InBindingMode)
+    {
+        const OtaCryptoSyncField_e cryptoField = (otaSync->UID5 & OTA_SYNC_CRYPTO_FIELD_BIT) ? OTA_CRYPTO_SYNC_BOOTCOUNT : OTA_CRYPTO_SYNC_ROLLING;
+        OtaCrypto.receiveSync(otaSync->cryptoHigh, otaSync->cryptoLow, cryptoField, OtaNonce, otaSync->nonce);
+    }
+#else
     // Verify the first two of three bytes of the binding ID, which should always match
     if (otaSync->UID3 != UID[3] || otaSync->UID4 != UID[4])
         return false;
@@ -1159,6 +1104,7 @@ static bool ICACHE_RAM_ATTR ProcessRfPacket_SYNC(uint32_t const now, OTA_Sync_s 
     // but the last 6 bits must modelmatch before sending any data to the FC
     if ((otaSync->UID5 & ~MODELMATCH_MASK) != (UID[5] & ~MODELMATCH_MASK))
         return false;
+#endif
 
     LastSyncPacket = now;
 #if defined(DEBUG_RX_SCOREBOARD)
@@ -1181,7 +1127,11 @@ static bool ICACHE_RAM_ATTR ProcessRfPacket_SYNC(uint32_t const now, OTA_Sync_s 
 
     // modelId = 0xff indicates modelMatch is disabled, the XOR does nothing in that case
     uint8_t modelXor = (~config.GetModelId()) & MODELMATCH_MASK;
+#ifdef USE_ENCRYPTION
+    bool modelMatched = (otaSync->UID5 & ~OTA_SYNC_CRYPTO_FIELD_BIT) == ((UID[5] ^ modelXor) & ~OTA_SYNC_CRYPTO_FIELD_BIT);
+#else
     bool modelMatched = otaSync->UID5 == (UID[5] ^ modelXor);
+#endif
     DBGVLN("MM %u=%u %d", otaSync->UID5, UID[5], modelMatched);
 
     if (connectionState == disconnected
@@ -1213,14 +1163,17 @@ bool ICACHE_RAM_ATTR ProcessRFPacket(SX12xxDriverCommon::rx_status const status)
     }
     uint32_t const beginProcessing = micros();
 
+    OTA_Packet_s * const otaPktPtr = (OTA_Packet_s * const)Radio.RXdataBuffer;
+
 #ifdef USE_ENCRYPTION
-    if (encryptionStateSend == ENCRYPTION_STATE_FULL)
+    // Sync packets stay unencrypted so the RX can always recover from them. Everything else is
+    // decrypted exactly once, and an unencrypted packet then simply fails the CRC check below.
+    if (otaPktPtr->std.type != PACKET_TYPE_SYNC && !InBindingMode)
     {
-	    DecryptMsg( Radio.RXdataBuffer );
+        OtaCrypto.apply((uint8_t *)Radio.RXdataBuffer, ExpressLRS_currAirRate_Modparams->PayloadLength, OTA_CRYPTO_UPLINK, OtaNonce);
     }
 #endif
 
-    OTA_Packet_s * const otaPktPtr = (OTA_Packet_s * const)Radio.RXdataBuffer;
     if (!OtaValidatePacketCrc(otaPktPtr))
     {
         DBGVLN("CRC error");
@@ -1335,9 +1288,6 @@ void SendMSPFrameToFC(uint8_t *mspData)
  **/
 void MspReceiveComplete()
 {
-#ifdef USE_ENCRYPTION
-	encryption_params_t *encryption_params;
-#endif
     switch (MspData[0])
     {
     case MSP_ELRS_SET_RX_WIFI_MODE: //0x0E
@@ -1349,16 +1299,6 @@ void MspReceiveComplete()
         });
 #endif
         break;
-
-#ifdef USE_ENCRYPTION
-	case MSP_ELRS_INIT_ENCRYPT:
-        DBGLN("MspData = %d, %d, %d, %d, %d, %d", MspData[1], MspData[2], MspData[3], MspData[4], MspData[5], MspData[6]);
-
-	    encryption_params = (encryption_params_t *) &MspData[1];
-		CryptoSetKeys(encryption_params);
-		encryptionStateSend = ENCRYPTION_STATE_FULL;
-		break;
-#endif
 
     case MSP_ELRS_MAVLINK_TLM: // 0xFD
         // raw mavlink data
@@ -2246,6 +2186,11 @@ void setup()
         devicesInit();
 
         setupBindingFromConfig();
+
+#ifdef USE_ENCRYPTION
+        static const uint8_t otaMasterKey[OTA_CRYPTO_KEY_SIZE] = {OTA_MASTER_KEY};
+        OtaCrypto.init(otaMasterKey);
+#endif
 
         FHSSrandomiseFHSSsequence(uidMacSeedGet());
 

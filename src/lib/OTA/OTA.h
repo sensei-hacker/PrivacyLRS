@@ -22,6 +22,8 @@
 
 // Mask used to XOR the ModelId into the SYNC packet for ModelMatch
 #define MODELMATCH_MASK 0x3f
+// With encryption, this bit of UID5 in the SYNC packet says which half of the counter it carries
+#define OTA_SYNC_CRYPTO_FIELD_BIT 0x80
 
 typedef struct {
     uint8_t fhssIndex;
@@ -29,8 +31,15 @@ typedef struct {
     uint8_t switchEncMode:1,
             newTlmRatio:3,
             rateIndex:4;
-    uint8_t UID3;
-    uint8_t UID4;
+    // With encryption, these two carry half of the encryption counter (see OtaCrypto.h)
+    union {
+        uint8_t UID3;
+        uint8_t cryptoHigh;
+    };
+    union {
+        uint8_t UID4;
+        uint8_t cryptoLow;
+    };
     uint8_t UID5;
 } PACKED OTA_Sync_s;
 

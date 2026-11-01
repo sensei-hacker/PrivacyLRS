@@ -298,6 +298,56 @@ void TxConfig::UpgradeEepromV6ToV7()
 }
 #endif
 
+#if defined(USE_ENCRYPTION)
+// The boot count must survive config resets and upgrades, so it is not part of m_config.
+// Reusing a value means reusing keystream, so it is kept in its own place in storage.
+#if !defined(PLATFORM_ESP32)
+#define CRYPTO_BOOT_COUNT_EEPROM_ADDR (RESERVED_EEPROM_SIZE - sizeof(uint32_t))
+#define CRYPTO_BOOT_COUNT_EEPROM_MAGIC 0x50CBU
+static_assert(sizeof(tx_config_t) <= CRYPTO_BOOT_COUNT_EEPROM_ADDR, "Boot count overlaps the config");
+#endif
+
+void
+TxConfig::WriteCryptoBootCount()
+{
+#if defined(PLATFORM_ESP32)
+    nvs_set_u16(handle, "cryptoboot", m_cryptoBootCount);
+    nvs_commit(handle);
+#else
+    const uint32_t stored = ((uint32_t)CRYPTO_BOOT_COUNT_EEPROM_MAGIC << 16) | m_cryptoBootCount;
+    m_eeprom->Put(CRYPTO_BOOT_COUNT_EEPROM_ADDR, stored);
+    m_eeprom->Commit();
+#endif
+}
+
+uint16_t
+TxConfig::NextCryptoBootCount()
+{
+    uint16_t bootCount = 0;
+#if defined(PLATFORM_ESP32)
+    nvs_get_u16(handle, "cryptoboot", &bootCount);
+#else
+    uint32_t stored = 0;
+    m_eeprom->Get(CRYPTO_BOOT_COUNT_EEPROM_ADDR, stored);
+    if ((stored >> 16) == CRYPTO_BOOT_COUNT_EEPROM_MAGIC)
+    {
+        bootCount = stored;
+    }
+#endif
+    m_cryptoBootCount = bootCount + 1;
+    WriteCryptoBootCount();
+    return m_cryptoBootCount;
+}
+
+void
+TxConfig::SetCryptoBootCount(uint16_t bootCount)
+{
+    m_cryptoBootCount = bootCount;
+    m_cryptoBootCountModified = true;
+    m_modified |= MAIN_CHANGED;
+}
+#endif
+
 void
 TxConfig::Commit()
 {
@@ -306,6 +356,14 @@ TxConfig::Commit()
         // No changes
         return;
     }
+#if defined(USE_ENCRYPTION)
+    // Has its own flag: a config reset also sets MAIN_CHANGED, and must not touch the boot count
+    if (m_cryptoBootCountModified)
+    {
+        WriteCryptoBootCount();
+        m_cryptoBootCountModified = false;
+    }
+#endif
 #if defined(PLATFORM_ESP32)
     // Write parts to NVS
     if (m_modified & MODEL_CHANGED)

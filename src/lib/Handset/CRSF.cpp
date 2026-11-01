@@ -56,7 +56,7 @@ uint32_t CRSF::VersionStrToU32(const char *verStr)
     // just use the OTA version as the major version number
     if (retVal < 0x010000)
     {
-        retVal = OTA_VERSION_ID << 16;
+        retVal = OTA_VERSION_ID_STOCK << 16;
     }
 #endif
     return retVal;

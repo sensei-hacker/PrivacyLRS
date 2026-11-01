@@ -35,11 +35,38 @@ def dequote(str):
         return str[1:-1]
     return str
 
+# Slow on purpose: makes each guess at a binding phrase expensive.
+# TX and RX must derive the same values, so the salt is fixed and not random per device.
+KDF_SALT = b"PrivacyLRS-binding-phrase-v2"
+KDF_ITERATIONS = 1000000
+KDF_MIN_PHRASE_LEN = 20
+derived_phrases = {}
+
+def derive_from_phrase(define):
+    '''Returns (uid, master_key) for a -DMY_BINDING_PHRASE define.
+
+    The UID comes from the same slow derivation as the key. It goes over the air, in the FHSS
+    sequence and the CRC seed, so a UID that was a fast hash of the phrase would let someone
+    test guesses at the phrase cheaply and skip the slow step altogether.
+    '''
+    if define not in derived_phrases:
+        phrase = re.search(r"MY_BINDING_PHRASE\s*=\s*\"?(.*?)\"?\s*$", define).group(1)
+        if not phrase:
+            print_error("Binding phrase is empty")
+        if len(phrase) < KDF_MIN_PHRASE_LEN:
+            sys.stdout.write("\n\033[47;31m WARNING: binding phrase is only %d characters. It is the only secret protecting "
+                             "your link, so use at least %d characters, ideally 5 or more random words. \033[0m\n\n"
+                             % (len(phrase), KDF_MIN_PHRASE_LEN))
+            sys.stdout.flush()
+        derived = hashlib.pbkdf2_hmac('sha256', phrase.encode('utf-8'), KDF_SALT, KDF_ITERATIONS, dklen=38)
+        derived_phrases[define] = (derived[32:38], derived[0:32])
+    return derived_phrases[define]
+
 def process_json_flag(define):
     parts = re.search(r"-D(.*)\s*=\s*(.*)$", define)
     if parts and define.startswith("-D"):
         if parts.group(1) == "MY_BINDING_PHRASE":
-            json_flags['uid'] = [x for x in hashlib.md5(define.encode()).digest()[0:6]]
+            json_flags['uid'] = list(derive_from_phrase(define)[0])
         if parts.group(1) == "HOME_WIFI_SSID":
             json_flags['wifi-ssid'] = dequote(parts.group(2))
         if parts.group(1) == "HOME_WIFI_PASSWORD":
@@ -71,15 +98,13 @@ def process_json_flag(define):
 def process_build_flag(define):
     if define.startswith("-D") or define.startswith("!-D"):
         if "MY_BINDING_PHRASE" in define:
-            bindingPhraseHash = hashlib.md5(define.encode()).digest()
-            UIDbytes = ",".join(list(map(str, bindingPhraseHash))[0:6])
-            define = "-DMY_UID=" + UIDbytes
+            uid, master_key = derive_from_phrase(define)
+            UIDbytes = ",".join(map(str, uid))
             sys.stdout.write("\u001b[32mUID bytes: " + UIDbytes + "\n")
-
-            stronghash=hashlib.sha256(define.encode()).hexdigest()
-            define = "-DUSE_ENCRYPTION=\"" + stronghash[0:32] + "\""
-            sys.stdout.write("\u001b[32mUSE_ENCRYPTION: " + stronghash[0:32] + "\n")
+            sys.stdout.write("\u001b[32mEncryption enabled\n")
             sys.stdout.flush()
+            build_flags.append("-DOTA_MASTER_KEY=" + ",".join(map(str, master_key)))
+            define = "-DUSE_ENCRYPTION"
         if "MY_STARTUP_MELODY=" in define:
             parsedMelody = melodyparser.parse(define.split('"')[1::2][0])
             define = "-DMY_STARTUP_MELODY_ARR=\"" + parsedMelody + "\""

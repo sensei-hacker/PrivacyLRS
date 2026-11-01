@@ -37,9 +37,10 @@ RC commands are also encrypted.
   The maintainer of PrivacyLRS has nothing but love for ExpressLRS and the ELRS maintainers. I simply wanted a version that protects my privacy.
 
 ## Status of the project and testing
-PrivacyLRS is currently in beta - testers needed. What needs testing is weird corner cases that could possibly break the
-link, by making the encryption get out of sync.  Performance (range, refresh rate, etc) is exactly the same as standard ELRS,
-so there is no point in testing that. Though you are welcome to if you wish.
+PrivacyLRS is currently in beta - testers needed. The encryption is stateless, so it cannot get out of sync the way earlier
+versions could, but this has not yet been tested in flight. See [ENCRYPTION_RELIABILITY.md](ENCRYPTION_RELIABILITY.md) for
+the issues found in earlier versions, what changed, and which tests are still needed on hardware.
+Radio performance (range, sensitivity) should match standard ELRS, but reconnecting may take slightly longer at some packet rates.
 \* If standard ELRS has latency of 6.522ms at a certain packet rate, PrivacyLRS will have latency of around 6.525ms - the
 the difference probably being too small to measure.
 If you choose to test PrivacyLRS, be sure to set up your failsafe carefully. Bugs could cause the link to fail.
@@ -47,11 +48,13 @@ If you choose to test PrivacyLRS, be sure to set up your failsafe carefully. Bug
 ## Differences between ELRS and PrivacyLRS
 The ELRS documentation makes clear that the binding phrase is *not* a security feature in standard ELRS.
 In standard ELRS, the binding phrase is to prevent *accidental* conflicts between two aircraft.
-This is different in PrivacyLRS. In PrivacyLRS, the bind phrase is used as a small part of the security.
-For this reason, it is recommended to make your bind phrase three or four words long - four words that other people are unlikely
-to guess.
-PrivacyLRS uses strong cryptographic keys which are randomly generated, but the bind phrase also plays small part in
-security.
+This is different in PrivacyLRS. In PrivacyLRS, the encryption key is derived from the bind phrase, so **the bind phrase is the
+only secret protecting your link**. Use 5 or more random words, and build your transmitter and receiver with the same phrase.
+Anyone who learns your phrase, or reads the firmware from a lost aircraft, can read your link, including past recordings.
+If you fully erase the transmitter's flash, choose a new phrase.
+
+PrivacyLRS hides your telemetry and RC commands from anyone listening. Like standard ELRS, it does not authenticate packets,
+so it does not stop someone deliberately jamming or disrupting your link.
 
 
 ## About ExpressLRS

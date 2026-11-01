@@ -27,6 +27,14 @@
 #include "utility/ProgMemUtil.h"
 #include <string.h>
 
+// These run for every packet from the radio interrupt, so keep them out of flash on ESP targets
+#if defined(ESP8266) || defined(ESP32)
+#include <Arduino.h>
+#define CHACHA_ISR_ATTR IRAM_ATTR
+#else
+#define CHACHA_ISR_ATTR
+#endif
+
 /**
  * \class ChaCha ChaCha.h <ChaCha.h>
  * \brief ChaCha stream cipher.
@@ -143,7 +151,7 @@ bool ChaCha::setIV(const uint8_t *iv, size_t len)
  *
  * \sa setIV()
  */
-bool ChaCha::setCounter(const uint8_t *counter, size_t len)
+bool CHACHA_ISR_ATTR ChaCha::setCounter(const uint8_t *counter, size_t len)
 {
     // Normally both the IV and the counter are 8 bytes in length.
     // However, if the IV was 12 bytes, then a 4 byte counter can be used.
@@ -171,7 +179,7 @@ bool ChaCha::getCounter(uint8_t *counter, size_t len)
 
 
 
-void ChaCha::encrypt(uint8_t *output, const uint8_t *input, size_t len)
+void CHACHA_ISR_ATTR ChaCha::encrypt(uint8_t *output, const uint8_t *input, size_t len)
 {
 	// uint_fast8_t *input_fast;
 	// uint_fast8_t *output_fast;
@@ -305,7 +313,7 @@ void ChaCha::clear()
  * access to the ChaCha hash core without the higher-level processing that
  * turns the core into a stream cipher.
  */
-void ChaCha::hashCore(uint32_t *output, const uint32_t *input, uint8_t rounds)
+void CHACHA_ISR_ATTR ChaCha::hashCore(uint32_t *output, const uint32_t *input, uint8_t rounds)
 {
     uint8_t posn;
 
