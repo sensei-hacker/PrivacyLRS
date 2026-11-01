@@ -152,9 +152,12 @@ condense_flags()
 
 if '-DRADIO_SX127X=1' in build_flags or '-DRADIO_LR1121=1' in build_flags:
     # disallow setting 2400s for 900
-    if fnmatch.filter(build_flags, '*-DRegulatory_Domain_ISM_2400') or \
-        fnmatch.filter(build_flags, '*-DRegulatory_Domain_EU_CE_2400'):
-        print_error('Regulatory_Domain 2400 not compatible with RADIO_SX127X/RADIO_LR1121')
+    # LR1121 is dual band and the Configurator also passes a 2400 domain for it. ISM_2400 is
+    # removed below (the 2.4GHz channels are fixed in FHSS.cpp), but LBT is SX1280 only
+    if '-DRADIO_SX127X=1' in build_flags and fnmatch.filter(build_flags, '*-DRegulatory_Domain_ISM_2400'):
+        print_error('Regulatory_Domain_ISM_2400 not compatible with RADIO_SX127X')
+    if fnmatch.filter(build_flags, '*-DRegulatory_Domain_EU_CE_2400'):
+        print_error('Regulatory_Domain_EU_CE_2400 (LBT) not compatible with RADIO_SX127X/RADIO_LR1121')
 
     # require a domain be set for 900
     if not fnmatch.filter(build_flags, '*-DRegulatory_Domain*'):
