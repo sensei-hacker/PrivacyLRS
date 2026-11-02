@@ -3,12 +3,12 @@ from genericpath import exists
 import os
 from random import randint
 import sys
-import hashlib
 import fnmatch
 import time
 import re
 import melodyparser
 import elrs_helpers
+import phrase_kdf
 
 build_flags = env.get('BUILD_FLAGS', [])
 json_flags = {}
@@ -35,22 +35,14 @@ def dequote(str):
         return str[1:-1]
     return str
 
-# Slow on purpose: makes each guess at a binding phrase expensive.
-# TX and RX must derive the same values, so the salt is fixed and not random per device.
-KDF_SALT = b"PrivacyLRS-binding-phrase-v2"
-KDF_ITERATIONS = 1000000
 KDF_MIN_PHRASE_LEN = 20
-derived_phrases = {}
+checked_phrases = set()
 
 def derive_from_phrase(define):
-    '''Returns (uid, master_key) for a -DMY_BINDING_PHRASE define.
-
-    The UID comes from the same slow derivation as the key. It goes over the air, in the FHSS
-    sequence and the CRC seed, so a UID that was a fast hash of the phrase would let someone
-    test guesses at the phrase cheaply and skip the slow step altogether.
-    '''
-    if define not in derived_phrases:
-        phrase = re.search(r"MY_BINDING_PHRASE\s*=\s*\"?(.*?)\"?\s*$", define).group(1)
+    '''Returns (uid, master_key) for a -DMY_BINDING_PHRASE define.'''
+    phrase = re.search(r"MY_BINDING_PHRASE\s*=\s*\"?(.*?)\"?\s*$", define).group(1)
+    if phrase not in checked_phrases:
+        checked_phrases.add(phrase)
         if not phrase:
             print_error("Binding phrase is empty")
         if len(phrase) < KDF_MIN_PHRASE_LEN:
@@ -58,9 +50,7 @@ def derive_from_phrase(define):
                              "your link, so use at least %d characters, ideally 5 or more random words. \033[0m\n\n"
                              % (len(phrase), KDF_MIN_PHRASE_LEN))
             sys.stdout.flush()
-        derived = hashlib.pbkdf2_hmac('sha256', phrase.encode('utf-8'), KDF_SALT, KDF_ITERATIONS, dklen=38)
-        derived_phrases[define] = (derived[32:38], derived[0:32])
-    return derived_phrases[define]
+    return phrase_kdf.derive_from_phrase(phrase)
 
 def process_json_flag(define):
     parts = re.search(r"-D(.*)\s*=\s*(.*)$", define)

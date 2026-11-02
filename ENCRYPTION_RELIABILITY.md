@@ -102,7 +102,7 @@ How each failure now recovers:
 ### Key derivation (`python/build_flags.py`)
 
 - **The phrase is what counts now.** PBKDF2-HMAC-SHA256 with 1,000,000 iterations turns the full phrase into a 32-byte key plus the 6-byte UID. This takes about 0.3 s per build.
-- **The UID comes from the same slow derivation,** so it can't be used as a shortcut for testing guesses.
+- **The UID comes from the same slow derivation,** so it can't be used as a shortcut for testing guesses. `build_flags.py` and `binary_configurator.py` share this code in `python/phrase_kdf.py`, so a device built with PlatformIO links to one configured by the Configurator.
 - **The key is no longer printed** in the build output.
 - **Short phrases get a warning:** the build warns under 20 characters and fails only if the phrase is empty.
 
@@ -119,7 +119,8 @@ How each failure now recovers:
 - **Keystream reuse is still possible after a full flash erase.** Erasing the flash resets `bootCount`, so old counter values come around again under the same phrase. **Use a new phrase after a full erase.** A corrupted NVS being erased has the same effect. The count also wraps after 65,536 boots.
 - **Nonce slips in Hybrid mode:** stock RC packets survive the RX's nonce being off by one, but now they fail until the next sync. This matches how stock Wide mode already behaves, so it should be rare.
 - **Flash writes:** one per TX boot.
-- **Setting a UID another way breaks the link.** The web UI's phrase field and `binary_configurator.py` still derive the UID with MD5, and the key can only be set at build time. Set the phrase at build time only, and always build the TX and RX from the same phrase.
+- **Setting the phrase in the web UI breaks the link, and weakens it.** The web UI's phrase field (`html/scan.js`) still derives the UID with MD5, and the key can only be set at build time. Set the phrase at build time only, and always build the TX and RX from the same phrase.
+- **Official release builds aren't encrypted.** Encryption needs a phrase at compile time, so a prebuilt image configured afterwards with `--phrase` gets a UID but no key. Check any image before flashing: `gzip -dc firmware.bin.gz | grep -c "expand 32-byte k"` prints `0` if it has no encryption.
 - **`finding4-*.md` are out of date.** The `DBGLN_KEY` macro they describe was removed along with the session key code.
 
 ## Verification
@@ -164,6 +165,12 @@ If telemetry fails while RC works, suspect the nonce captured in `HandlePrepareF
 1. **Flash both the TX and RX from this branch, built with the same phrase.** They won't link to anything else, including older PrivacyLRS builds.
 2. **Choose a new phrase of 5 or more random words.** It's now the only secret.
 3. **Re-check your failsafe setup** before any flight.
+
+## Building with ExpressLRS Configurator
+
+Use Local mode, which compiles with your binding phrase. For an ESP8285 RX, `binary_configurator.py` now also writes `firmware.bin.gz` next to its input file, so the Configurator should offer a compressed file that the RX web UI accepts. It may be named `<target>.gz`, for example `betafpv.rx_2400.aio.wifi.gz`, with `firmware.bin.gz` beside it. ESP8285 TX targets still get a `.bin`, which is what their web UI expects.
+
+Local mode overwrites `src/user_defines.txt` with your phrase, and writes `src/firmware.bin.gz`. Take care not to commit either file.
 
 ## Next steps
 
