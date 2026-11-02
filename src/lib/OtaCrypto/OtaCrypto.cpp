@@ -109,3 +109,28 @@ void ICACHE_RAM_ATTR OtaCryptoSession::receiveSync(uint8_t high, uint8_t low, Ot
         rolling = rolling - 1;
     }
 }
+
+bool ICACHE_RAM_ATTR OtaCryptoSession::syncMatches(uint8_t high, uint8_t low, OtaCryptoSyncField_e field) const
+{
+    const uint16_t value = ((uint16_t)high << 8) | low;
+    return value == ((field == OTA_CRYPTO_SYNC_ROLLING) ? rolling : bootCount);
+}
+
+bool ICACHE_RAM_ATTR OtaSyncGuard::allow(bool linkHealthy, bool syncMatchesState, uint8_t rateIndex)
+{
+    if (!linkHealthy || syncMatchesState)
+    {
+        waitingForConfirm = false;
+        return true;
+    }
+
+    if (waitingForConfirm && rateToConfirm == rateIndex)
+    {
+        waitingForConfirm = false;
+        return true;
+    }
+
+    waitingForConfirm = true;
+    rateToConfirm = rateIndex;
+    return false;
+}

@@ -50,7 +50,7 @@ How long the old design lasted before permanent loss, from a simulation of its c
 | S5 | Key messages could be replayed | `src/rx_main.cpp:1354` | Replaying an old key message would make the RX switch to a wrong key and lose the link. | Fixed (no key messages now) |
 | S6 | ChaCha12, not ChaCha20 | `src/tx_main.cpp:330`, `src/rx_main.cpp:506` | The "ChaCha20 upgrade" was overridden by `rounds = 12`. This was a false claim rather than a practical weakness. | Fixed |
 | S7 | Unprocessed RSSI used as randomness | `src/tx_main.cpp:234` | Session keys came straight from radio RSSI bits with no hashing. | Fixed (no random keys now) |
-| S8 | Key printed in build logs | `python/build_flags.py:81` | Every build printed the master key. | Fixed |
+| S8 | Key printed in build logs | `python/build_flags.py:81` | Every build printed the master key. The first fix removed one print but missed the `build flags:` line, so the key kept being printed until that line was filtered too. | Fixed |
 | S9 | Telemetry off meant no encryption | `src/tx_main.cpp:1776` | The key exchange needs telemetry, so with telemetry off nothing was encrypted, with no warning. | Fixed |
 
 ### Tests
@@ -82,7 +82,8 @@ Other changes to how packets are handled:
 - **No handshake:** `InitCrypto`, `CryptoSetKeys`, `DecryptMsg`, `MSP_ELRS_INIT_ENCRYPT`, the encryption states and `include/encryption.h` are all removed.
 - **Sync packets are unencrypted, as in stock.** The 2 packet-type bits of every packet are also unencrypted, so the RX knows what it received before decrypting.
 - **Sync packet layout:** `UID3` and `UID4` now carry half of the counter, alternating between `rolling` and `bootCount`. The top bit of `UID5` says which one. The RX therefore needs two syncs after a reboot.
-- **The UID is checked less directly in sync packets.** It's now checked by the CRC seed (from `UID4` and `UID5`) and by one remaining bit of `UID5`.
+- **Sync packets reject bad data less well than stock.** The UID bytes in `UID3` and `UID4` are gone, leaving the 14-bit CRC and one bit of `UID5`, so about 1 in 131072 random packets passes, against about 1 in 17 billion in stock. Changing the CRC seed can't help, because a random packet passes a 14-bit CRC at the same rate whatever the seed.
+- **`OtaSyncGuard` protects a working link from those packets.** While the RX is connected and has decoded a non-sync packet in the last 250 ms, it ignores a sync whose nonce, FHSS index, packet rate or counter disagree with its own, unless a second sync asks for the same rate. The TX sends several syncs for a rate change, so that still works, with one fewer spare sync. Once packets stop arriving every sync is believed, so recovery isn't slowed. A disconnected or tentative RX isn't protected, and can still act on a false sync.
 - **Telemetry:** the TX saves the epoch and nonce in `HandlePrepareForTLM`, which is the same slot the RX encrypts from.
 - **ChaCha20 with a 256-bit key.** The ChaCha functions now run from IRAM, confirmed in the ESP8285 ELF. IRAM grew by 664 bytes.
 - **`OTA_VERSION_ID`** differs from stock on encrypted builds, so encrypted and stock devices can't partly connect. Handsets still see the stock version number.
@@ -103,7 +104,7 @@ How each failure now recovers:
 
 - **The phrase is what counts now.** PBKDF2-HMAC-SHA256 with 1,000,000 iterations turns the full phrase into a 32-byte key plus the 6-byte UID. This takes about 0.3 s per build.
 - **The UID comes from the same slow derivation,** so it can't be used as a shortcut for testing guesses. `build_flags.py` and `binary_configurator.py` share this code in `python/phrase_kdf.py`, so a device built with PlatformIO links to one configured by the Configurator.
-- **The key is no longer printed** in the build output.
+- **The key is left out of the normal build output.** It's still passed to the compiler as a define, so it appears in verbose output (`pio run -v`) and in `compile_commands.json`. Don't share those. Logs from builds before this fix contain the key, so treat them as secret, or change the phrase if they've been shared.
 - **Short phrases get a warning:** the build warns under 20 characters and fails only if the phrase is empty.
 
 ### Trade-offs
@@ -129,9 +130,9 @@ How each failure now recovers:
 
 | Check | Result |
 |---|---|
-| New encryption tests, running real `OtaCrypto` and `ChaCha` as a separate TX and RX with the real CRC | 18 of 18 pass |
+| New encryption tests, running real `OtaCrypto` and `ChaCha` as a separate TX and RX with the real CRC | 25 of 25 pass, including 7 for `OtaSyncGuard` |
 | ChaCha20 known-answer vector | Pass |
-| Mutation checks: 5 deliberate bugs added to `OtaCrypto.cpp` | All 5 caught |
+| Mutation checks: 5 deliberate bugs added to `OtaCrypto.cpp`, plus 2 in `OtaSyncGuard` | All caught |
 | Other native tests | Pass, except `test_stubborn` and `test_msp_vtx`, which also error on the unmodified code |
 | Builds with a phrase | ESP8285 RX, ESP32 TX, ESP8285 TX, ESP32 RX, ESP32 900 MHz TX, ESP32 LR1121 TX |
 | Build without a phrase (ESP32 TX, ESP8285 RX) | Compile. The ESP8285 RX contains no crypto code |
@@ -140,7 +141,7 @@ The tests cover bursts of up to 100,000 lost packets, 50% random loss, RX and TX
 
 ### Hardware test results
 
-Tested on a RadioMaster Pocket (ESP32 TX) and a BETAFPV 2.4GHz AIO RX (ESP8285), reported by the person who flashed them. The packet rates used weren't recorded.
+Tested on a RadioMaster Pocket (ESP32 TX) and a BETAFPV 2.4GHz AIO RX (ESP8285), reported by the person who flashed them. The packet rates used weren't recorded. These tests were run before `OtaSyncGuard` was added, so they need repeating with it.
 
 | Test | Result |
 |---|---|
@@ -155,6 +156,7 @@ Tested on a RadioMaster Pocket (ESP32 TX) and a BETAFPV 2.4GHz AIO RX (ESP8285),
 
 | Test | Expected result |
 |---|---|
+| Repeat the hardware tests above with `OtaSyncGuard`, especially changing packet rate in Lua, with a weak signal as well as a strong one | Same results. The RX now needs 2 of the TX's sync packets to change rate while connected |
 | Time reconnects against stock 3.5.3, especially at slow rates such as 50Hz | Close to stock, despite needing two syncs |
 | Telemetry off | Link works |
 | 100 cold boots and 100 rate changes | No permanent link loss |

@@ -204,7 +204,8 @@ if fnmatch.filter(build_flags, '*Regulatory_Domain_ISM_2400*') and \
 
 env['OPTIONS_JSON'] = json_flags
 env['BUILD_FLAGS'] = build_flags
-sys.stdout.write("\nbuild flags: %s\n\n" % build_flags)
+# The key must stay out of build logs, as it can decrypt every recording of this link
+sys.stdout.write("\nbuild flags: %s\n\n" % [f for f in build_flags if not f.startswith("-DOTA_MASTER_KEY=")])
 
 if fnmatch.filter(build_flags, '*PLATFORM_ESP32*'):
     sys.stdout.write("\u001b[32mBuilding for ESP32 Platform\n")

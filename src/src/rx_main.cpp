@@ -226,6 +226,13 @@ bool alreadyTLMresp = false;
 ///////Variables for Telemetry and Link Quality///////////////
 uint32_t LastValidPacket = 0;           //Time the last valid packet was recv
 uint32_t LastSyncPacket = 0;            //Time the last valid packet was recv
+#ifdef USE_ENCRYPTION
+// Decoding any packet other than sync within this time means the nonce and counter are right.
+// Must stay well under the time between sync packets on a connected link, 5 seconds or more.
+#define SYNC_GUARD_HEALTHY_MS 250
+static uint32_t LastDecodedPacket = 0;  // Time the last valid packet other than sync was recv
+static OtaSyncGuard syncGuard;
+#endif
 
 static uint32_t SendLinkStatstoFCintervalLastSent;
 static uint8_t SendLinkStatstoFCForcedSends;
@@ -1084,7 +1091,7 @@ static bool ICACHE_RAM_ATTR ProcessRfPacket_SYNC(uint32_t const now, OTA_Sync_s 
 {
 #ifdef USE_ENCRYPTION
     // UID3 and UID4 carry the encryption counter instead, and the top bit of UID5 says which
-    // part of it. The UID is still checked by the CRC, as UID4 and UID5 seed OtaCrcInitializer.
+    // part of it. That leaves one UID bit here, plus the CRC, so OtaSyncGuard makes up for it.
     const uint8_t uidCheckMask = (uint8_t)~(MODELMATCH_MASK | OTA_SYNC_CRYPTO_FIELD_BIT);
     if ((otaSync->UID5 & uidCheckMask) != (UID[5] & uidCheckMask))
         return false;
@@ -1092,6 +1099,17 @@ static bool ICACHE_RAM_ATTR ProcessRfPacket_SYNC(uint32_t const now, OTA_Sync_s 
     if (!InBindingMode)
     {
         const OtaCryptoSyncField_e cryptoField = (otaSync->UID5 & OTA_SYNC_CRYPTO_FIELD_BIT) ? OTA_CRYPTO_SYNC_BOOTCOUNT : OTA_CRYPTO_SYNC_ROLLING;
+        const bool linkHealthy = connectionState == connected && (now - LastDecodedPacket) < SYNC_GUARD_HEALTHY_MS;
+        // The other fields aren't compared as the TX really does change them on a working link,
+        // and a packet that matches all of these is too unlikely to be anything but a real sync
+        const bool syncMatchesState = otaSync->nonce == OtaNonce
+            && otaSync->fhssIndex == FHSSgetCurrIndex()
+            && otaSync->rateIndex == ExpressLRS_currAirRate_Modparams->index
+            && OtaCrypto.syncMatches(otaSync->cryptoHigh, otaSync->cryptoLow, cryptoField);
+        if (!syncGuard.allow(linkHealthy, syncMatchesState, otaSync->rateIndex))
+        {
+            return false;
+        }
         OtaCrypto.receiveSync(otaSync->cryptoHigh, otaSync->cryptoLow, cryptoField, OtaNonce, otaSync->nonce);
     }
 #else
@@ -1189,6 +1207,12 @@ bool ICACHE_RAM_ATTR ProcessRFPacket(SX12xxDriverCommon::rx_status const status)
     unsigned long now = millis();
 
     LastValidPacket = now;
+#ifdef USE_ENCRYPTION
+    if (otaPktPtr->std.type != PACKET_TYPE_SYNC)
+    {
+        LastDecodedPacket = now;
+    }
+#endif
 
     switch (otaPktPtr->std.type)
     {

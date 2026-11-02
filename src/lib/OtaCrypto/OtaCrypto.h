@@ -75,6 +75,8 @@ public:
 
     // RX: call for every valid sync packet, before OtaNonce is updated from it
     void receiveSync(uint8_t high, uint8_t low, OtaCryptoSyncField_e field, uint8_t currentNonce, uint8_t syncNonce);
+    // RX: true if a sync packet carries the value this end already has
+    bool syncMatches(uint8_t high, uint8_t low, OtaCryptoSyncField_e field) const;
 
 private:
     ChaCha cipher;
@@ -82,6 +84,30 @@ private:
     volatile uint16_t rolling;
     OtaCryptoSyncField_e nextSyncField;
     volatile bool bootCountChanged;
+};
+
+/**
+ * Decides whether the RX should act on a sync packet.
+ *
+ * Sync packets have only the CRC and one UID bit to reject bad data, as the counter uses the
+ * bytes that stock fills with the UID. About 1 in 131072 random packets gets through, and acting
+ * on one could change the counter, nonce or packet rate of a working link.
+ *
+ * Valid packets still arriving prove the nonce and counter are right, so while that's true a
+ * sync that disagrees with them is only believed once a second one asks for the same packet rate.
+ * As soon as packets stop arriving, every sync is believed, so recovery is as fast as without this.
+ */
+class OtaSyncGuard
+{
+public:
+    // linkHealthy: connected, with packets other than sync decoding recently
+    // syncMatchesState: the nonce, FHSS index, packet rate and counter all match this end's
+    // Returns true if the sync should be acted on
+    bool allow(bool linkHealthy, bool syncMatchesState, uint8_t rateIndex);
+
+private:
+    bool waitingForConfirm = false;
+    uint8_t rateToConfirm = 0;
 };
 
 extern OtaCryptoSession OtaCrypto;

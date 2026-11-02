@@ -523,6 +523,107 @@ void test_telemetry_decodes_with_captured_epoch_across_wrap(void)
     TEST_ASSERT_EQUAL_UINT8_ARRAY(sent, air, sizeof(sent));
 }
 
+/***** Sync guard *****/
+
+#define RATE_CURRENT 3
+#define RATE_NEW 5
+#define RATE_OTHER 7
+
+// A corrupt packet passes the CRC and claims a wrong counter, nonce and rate on a working link.
+// Without the guard, the RX would act on it and stop decoding.
+void test_false_sync_does_not_break_a_healthy_link(void)
+{
+    SimTx tx;
+    SimRx rx;
+    OtaSyncGuard guard;
+    connect(tx, rx);
+    TEST_ASSERT_TRUE(slot(tx, rx));
+
+    const uint8_t falseHigh = 0xde, falseLow = 0xad, falseNonce = rx.nonce + 77;
+    const bool matches = rx.nonce == falseNonce && rx.crypto.syncMatches(falseHigh, falseLow, OTA_CRYPTO_SYNC_ROLLING);
+    TEST_ASSERT_FALSE(matches);
+
+    if (guard.allow(true, matches, RATE_OTHER))
+    {
+        rx.crypto.receiveSync(falseHigh, falseLow, OTA_CRYPTO_SYNC_ROLLING, rx.nonce, falseNonce);
+        rx.nonce = falseNonce;
+    }
+
+    TEST_ASSERT_TRUE(slot(tx, rx));
+}
+
+// Packets stop arriving after a nonce slip, so the very next sync must be believed
+void test_sync_is_believed_as_soon_as_the_link_is_unhealthy(void)
+{
+    OtaSyncGuard guard;
+    TEST_ASSERT_TRUE(guard.allow(false, false, RATE_OTHER));
+    // Nor does that one count towards confirming a sync on a healthy link later
+    TEST_ASSERT_FALSE(guard.allow(true, false, RATE_OTHER));
+}
+
+void test_matching_sync_is_always_believed(void)
+{
+    OtaSyncGuard guard;
+    for (unsigned i = 0; i < 10; ++i)
+    {
+        TEST_ASSERT_TRUE(guard.allow(true, true, RATE_CURRENT));
+    }
+}
+
+// The TX asks for a rate change with several sync packets, while the link is still working
+void test_rate_change_is_believed_on_the_second_sync(void)
+{
+    OtaSyncGuard guard;
+    TEST_ASSERT_FALSE(guard.allow(true, false, RATE_NEW));
+    TEST_ASSERT_TRUE(guard.allow(true, false, RATE_NEW));
+    // Used up by that, so the next one starts again
+    TEST_ASSERT_FALSE(guard.allow(true, false, RATE_NEW));
+}
+
+// Real syncs keep matching after a false one, which must not then confirm a later false one
+void test_matching_sync_clears_a_waiting_false_sync(void)
+{
+    OtaSyncGuard guard;
+    TEST_ASSERT_FALSE(guard.allow(true, false, RATE_OTHER));
+    TEST_ASSERT_TRUE(guard.allow(true, true, RATE_CURRENT));
+    TEST_ASSERT_FALSE(guard.allow(true, false, RATE_OTHER));
+}
+
+void test_different_rate_does_not_confirm(void)
+{
+    OtaSyncGuard guard;
+    TEST_ASSERT_FALSE(guard.allow(true, false, RATE_OTHER));
+    TEST_ASSERT_FALSE(guard.allow(true, false, RATE_NEW));
+    TEST_ASSERT_TRUE(guard.allow(true, false, RATE_NEW));
+}
+
+void test_sync_matches_checks_the_field_it_carries(void)
+{
+    SimTx tx;
+    SimRx rx;
+    connect(tx, rx);
+    tx.crypto.setBootCount(0x1234);
+    rx.crypto.setBootCount(0x1234);
+    for (unsigned i = 0; i < 256; ++i)
+    {
+        tx.tick();
+        rx.tick();
+    }
+
+    uint8_t high, low;
+    OtaCryptoSyncField_e field;
+    for (unsigned i = 0; i < 2; ++i)
+    {
+        tx.crypto.fillSync(&high, &low, &field);
+        TEST_ASSERT_TRUE(rx.crypto.syncMatches(high, low, field));
+        TEST_ASSERT_FALSE(rx.crypto.syncMatches(high ^ 0x01, low, field));
+        TEST_ASSERT_FALSE(rx.crypto.syncMatches(high, low ^ 0x01, field));
+        // The same bytes under the other field are a different value, as rolling != bootCount here
+        const OtaCryptoSyncField_e other = (field == OTA_CRYPTO_SYNC_ROLLING) ? OTA_CRYPTO_SYNC_BOOTCOUNT : OTA_CRYPTO_SYNC_ROLLING;
+        TEST_ASSERT_FALSE(rx.crypto.syncMatches(high, low, other));
+    }
+}
+
 int main(int argc, char **argv)
 {
     UNITY_BEGIN();
@@ -544,5 +645,12 @@ int main(int argc, char **argv)
     RUN_TEST(test_uplink_and_telemetry_never_share_keystream);
     RUN_TEST(test_sync_alternates_between_rolling_and_bootcount);
     RUN_TEST(test_telemetry_decodes_with_captured_epoch_across_wrap);
+    RUN_TEST(test_false_sync_does_not_break_a_healthy_link);
+    RUN_TEST(test_sync_is_believed_as_soon_as_the_link_is_unhealthy);
+    RUN_TEST(test_matching_sync_is_always_believed);
+    RUN_TEST(test_rate_change_is_believed_on_the_second_sync);
+    RUN_TEST(test_matching_sync_clears_a_waiting_false_sync);
+    RUN_TEST(test_different_rate_does_not_confirm);
+    RUN_TEST(test_sync_matches_checks_the_field_it_carries);
     return UNITY_END();
 }
