@@ -38,8 +38,8 @@ RC commands are also encrypted.
 
 ## Status of the project and testing
 PrivacyLRS is currently in beta - testers needed. The encryption is stateless, so it cannot get out of sync the way earlier
-versions could, but this has not yet been tested in flight. See [ENCRYPTION_RELIABILITY.md](ENCRYPTION_RELIABILITY.md) for
-the issues found in earlier versions, what changed, and which tests are still needed on hardware.
+versions could. It has had only basic hardware testing, including a short flight. See [ENCRYPTION_RELIABILITY.md](ENCRYPTION_RELIABILITY.md) for
+the issues found in earlier versions, what changed, and which tests are still needed.
 Radio performance (range, sensitivity) should match standard ELRS, but reconnecting may take slightly longer at some packet rates.
 \* If standard ELRS has latency of 6.522ms at a certain packet rate, PrivacyLRS will have latency of around 6.525ms - the
 the difference probably being too small to measure.

@@ -9,7 +9,7 @@ The encryption made the control link fail permanently in situations stock Expres
 
 This change replaces the session key and running counter with stateless encryption, so a packet can be decrypted without knowing anything about earlier packets. It also derives the key properly from the binding phrase.
 
-**This has not been tested on hardware or in flight.** The logic is unit tested and the firmware compiles, but radio timing can only be checked on real devices. See [Tests still needed](#tests-still-needed-on-hardware) before trusting it on an aircraft.
+**This has had only basic hardware testing.** On a RadioMaster Pocket and a BETAFPV 2.4GHz AIO RX, the main recovery tests passed and it survived a short flight. It has not had a long soak test or been flown at the edge of range, so treat it as beta. See [Hardware test results](#hardware-test-results).
 
 ## Issues found
 
@@ -138,27 +138,29 @@ How each failure now recovers:
 
 The tests cover bursts of up to 100,000 lost packets, 50% random loss, RX and TX reboots, rate changes, nonce and rolling wraps, and counters never repeating.
 
-### Tests still needed on hardware
+### Hardware test results
 
-Take the props off. Run these on stock 3.5.3 as well, so there's something to compare against.
+Tested on a RadioMaster Pocket (ESP32 TX) and a BETAFPV 2.4GHz AIO RX (ESP8285), reported by the person who flashed them. The packet rates used weren't recorded.
+
+| Test | Result |
+|---|---|
+| Connect and fly a short flight | Passed |
+| Power-cycle the drone, leave the radio on | Passed |
+| Cover the RX with a metal tin for 2 s, then remove it | Passed |
+| Change packet rate in Lua | Passed |
+| Reboot the radio, leave the drone on | Passed |
+| Run 100 Full and 333 Full | Passed |
+
+### Tests still needed
 
 | Test | Expected result |
 |---|---|
-| Link up and check Betaflight's receiver tab | Channels move, telemetry and LQ appear on the radio |
-| Power-cycle the drone, leave the radio on | Reconnects, and time it against stock |
-| Reboot the radio, leave the drone on | Reconnects with telemetry |
-| Cover the RX with a metal tin for 2 s, then remove it | Link comes back |
-| Change packet rate in Lua, at every rate you use | Reconnects each time, with telemetry |
-| Run 100 Full and 333 Full | Link works, no crashes |
-| Telemetry on and off | Link works both ways |
+| Time reconnects against stock 3.5.3, especially at slow rates such as 50Hz | Close to stock, despite needing two syncs |
+| Telemetry off | Link works |
 | 100 cold boots and 100 rate changes | No permanent link loss |
-| Several hours on the bench | No drops or reboots |
+| Several hours of accumulated running | No drops or reboots |
 | Measure decrypt time on the ESP8285 | Comfortably inside the 200 µs budget (`PACKET_TO_TOCK_SLACK`) |
 | Fly at the edge of range, using an aircraft you can afford to lose | Same range and recovery as stock |
-
-**Check these first, as they rest on reading the code:** that the TX and RX agree on `OtaNonce` for every packet type, especially telemetry, and that reconnect time is acceptable at slow rates such as 50Hz.
-
-If telemetry fails while RC works, suspect the nonce captured in `HandlePrepareForTLM` first.
 
 ## Upgrading
 
@@ -174,5 +176,5 @@ Local mode overwrites `src/user_defines.txt` with your phrase, and writes `src/f
 
 ## Next steps
 
-1. Run the hardware tests above.
+1. Finish the remaining hardware tests above.
 2. Add forward secrecy for telemetry only, on its own branch. RC and sync would stay on the pre-shared key, so a failed handshake could never affect control. The handshake would only run while disarmed, and telemetry would fall back to the pre-shared key if it fails.
