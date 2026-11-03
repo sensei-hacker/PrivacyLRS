@@ -24,24 +24,10 @@
 #include "devBackpack.h"
 
 #ifdef USE_ENCRYPTION
-#include <encryption.h>
-#include <Crypto.h>
-#include <ChaCha.h>
-#include <string.h>
-#if defined(ESP8266) || defined(ESP32)
-#include <pgmspace.h>
-#else
-#include <avr/pgmspace.h>
-#endif
-ChaCha cipher(20);  // ChaCha20 - RFC 8439 standard (Finding #5)
-uint8_t encryptionCounter[8];
-encryptionState_e encryptionStateSend = ENCRYPTION_STATE_NONE;
-encryption_params_t nonce_key;
-uint8_t MSPDataPackage[ELRS_MSP_BUFFER];
-#else
-uint8_t MSPDataPackage[5];
+#include "OtaCrypto.h"
 #endif
 
+uint8_t MSPDataPackage[5];
 
 #include "MAVLink.h"
 
@@ -95,6 +81,13 @@ LQCALC<25> LQCalc;
 
 volatile bool busyTransmitting;
 static volatile bool ModelUpdatePending;
+
+#ifdef USE_ENCRYPTION
+// The RX encrypts telemetry using the nonce of the slot before the telemetry slot. By the
+// time the telemetry arrives OtaNonce has moved on, so save what the RX will have used.
+static OtaCryptoEpoch_t tlmCryptoEpoch;
+static uint8_t tlmCryptoNonce;
+#endif
 
 #define BindingSpamAmount 25
 static uint8_t BindingSendCount;
@@ -206,183 +199,6 @@ void ICACHE_RAM_ATTR LinkStatsFromOta(OTA_LinkStats_s * const ls)
   MspSender.ConfirmCurrentPayload(ls->mspConfirm);
 }
 
-#ifdef USE_ENCRYPTION
-
-// TODO test random functions on both RADIO_SX127X and RADIO_SX128X,
-// then delete unused functions.
-#ifdef RADIO_SX127X
-void RandRSSI(uint8_t *outrnd, size_t len)
-{
-  uint8_t rnd;
-
-  for (int i = 0; i < len; i++)
-  {
-    Radio.SetMode(SX127x_OPMODE_CAD, SX12XX_Radio_1);
-    rnd = 0;
-    for (uint8_t bit = 0; bit < 8; bit++)
-    {
-        delay(1);
-        rnd |= ( Radio.GetCurrRSSI(SX12XX_Radio_1) & 0x01 ) << bit;
-    }
-    outrnd[i] = rnd;
-  }
-
-}
-#endif
-
-#ifdef RADIO_SX128X
-void RandRSSI(uint8_t *outrnd, size_t len)
-{
-
-  uint8_t rnd;
-
-  Radio.RXnb(SX1280_MODE_RX_CONT);
-
-  for (int i = 0; i < len; i++)
-  {
-    rnd = 0;
-    for (uint8_t bit = 0; bit < 8; bit++)
-    {
-        delay(1);
-        rnd |= ( Radio.GetRssiInst(SX12XX_Radio_1) & 0x01 ) << bit;
-    }
-    outrnd[i] = rnd;
-  }
-}
-
-
-#endif
-
-#ifdef RADIO_LR1121
-void RandRSSI(uint8_t *outrnd, size_t len)
-{
-
-  uint8_t rnd;
-
-  Radio.RXnb(LR1121_MODE_RX_CONT);
-
-  for (int i = 0; i < len; i++)
-  {
-    rnd = 0;
-    for (uint8_t bit = 0; bit < 8; bit++)
-    {
-        delay(1);
-        rnd |= ( Radio.GetRssiInst(SX12XX_Radio_1) & 0x01 ) << bit;
-    }
-    outrnd[i] = rnd;
-  }
-}
-
-
-#endif
-
-void GetRandomBytes(uint8_t *outrnd, size_t len)
-{
-#ifdef RADIO_SX127X
-  // Radio.ConfigLoraDefaults();
-  Radio.SetRxTimeoutUs(0); // Sets continuous receive mode
-  Radio.RXnb();
-  for (int i = 0; i < len; i++)
-  {
-    for( uint8_t bit = 0; bit < 8; bit++ )
-    {
-      // REG_LR_RSSIWIDEBAND and SX1272Read not defined at this scope
-      // outrnd |= ( ( uint32_t )SX1272Read( REG_LR_RSSIWIDEBAND ) & 0x01 ) << bit;
-      delay(1);
-    }
-  }
-#endif
-}
-
-/*
-Not used because it may return 0 on some hardware - kept for future reference if needed.
-uint32_t GetRandom32t()
-{
-  uint32_t rnd = 0;
-#ifdef RADIO_SX128X
-  Radio.RXnb(SX1280_MODE_RX_CONT);
-#endif
-#ifdef RADIO_LR1121
-  Radio.RXnb(LR1121_MODE_RX_CONT);
-#endif
-#ifdef RADIO_SX127X
-  // Radio.ConfigLoraDefaults();
-  Radio.SetRxTimeoutUs(0); // Sets continuous receive mode
-  Radio.RXnb();
-#endif
-
-  for( int i = 0; i < 32; i++ )
-  {
-    delay(1);
-    // REG_LR_RSSIWIDEBAND and SX1272Read not defined at this scope
-    // Unfiltered RSSI value reading. Only takes the least sitgnificant bit
-    // rnd |= ( ( uint32_t )SX1272Read( REG_LR_RSSIWIDEBAND ) & 0x01 ) << i;
-  }
-  return rnd;
-}
-*/
-
-
-bool InitCrypto()
-{
-
-  encryption_params_t *enc_params;
-  uint8_t rounds = 12;
-  size_t counterSize = 8;
-  size_t keySize = 16;
-
-  uint8_t counter[] = {109, 110, 111, 112, 113, 114, 115, 116};
-
-  memcpy(encryptionCounter, counter, counterSize);
-  cipher.clear();
-
-  unsigned char *master_key = (unsigned char *) calloc( keySize + 1, sizeof(char) );
-  hexStr2Arr( master_key, stringify_expanded(USE_ENCRYPTION), keySize );
-
-  cipher.setNumRounds(rounds);
-  if ( !cipher.setKey(master_key, keySize) )
-  {
-      return false;
-  }
-  if ( !cipher.setIV(nonce_key.nonce, cipher.ivSize()) )
-  {
-      return false;
-  }
-  if (!cipher.setCounter(counter, counterSize))
-  {
-      return false;
-  }
-
-  // Encrypt the session key and send it
-  MSPDataPackage[0] = MSP_ELRS_INIT_ENCRYPT;
-  enc_params = (encryption_params_t *) &MSPDataPackage[1];
-  memcpy( enc_params->nonce, nonce_key.nonce, cipher.ivSize() );
-  memcpy( enc_params->key, nonce_key.key, keySize );
-
-  cipher.encrypt(enc_params->key, enc_params->key, keySize);
-  free(master_key);
-
-  MspSender.SetDataToTransmit(MSPDataPackage, sizeof(encryption_params_t) + 1);
-
-  // Further packets are encrypted with the session key
-  if ( !cipher.setKey(nonce_key.key, keySize) )
-  {
-      return false;
-  }
-  if ( !cipher.setIV(nonce_key.nonce, cipher.ivSize()) )
-  {
-      return false;
-  }
-  if (!cipher.setCounter(counter, counterSize))
-  {
-      return false;
-  }
-
-  return true;
-}
-#endif
-
-
 bool ICACHE_RAM_ATTR ProcessTLMpacket(SX12xxDriverCommon::rx_status const status)
 {
   if (status != SX12xxDriverCommon::SX12XX_RX_OK)
@@ -392,9 +208,9 @@ bool ICACHE_RAM_ATTR ProcessTLMpacket(SX12xxDriverCommon::rx_status const status
   }
 
 #ifdef USE_ENCRYPTION
-  if (encryptionStateSend == ENCRYPTION_STATE_FULL)
+  if (!InBindingMode)
   {
-    DecryptMsg( Radio.RXdataBuffer );
+    OtaCrypto.apply((uint8_t *)Radio.RXdataBuffer, ExpressLRS_currAirRate_Modparams->PayloadLength, OTA_CRYPTO_DOWNLINK, tlmCryptoEpoch, tlmCryptoNonce);
   }
 #endif
 
@@ -533,9 +349,15 @@ void ICACHE_RAM_ATTR GenerateSyncPacketData(OTA_Sync_s * const syncPtr)
   syncPtr->rateIndex = Index;
   syncPtr->newTlmRatio = newTlmRatio - TLM_RATIO_NO_TLM;
   syncPtr->switchEncMode = SwitchEncMode;
+#ifdef USE_ENCRYPTION
+  OtaCryptoSyncField_e cryptoField;
+  OtaCrypto.fillSync(&syncPtr->cryptoHigh, &syncPtr->cryptoLow, &cryptoField);
+  syncPtr->UID5 = (UID[5] & ~OTA_SYNC_CRYPTO_FIELD_BIT) | (cryptoField == OTA_CRYPTO_SYNC_BOOTCOUNT ? OTA_SYNC_CRYPTO_FIELD_BIT : 0);
+#else
   syncPtr->UID3 = UID[3];
   syncPtr->UID4 = UID[4];
   syncPtr->UID5 = UID[5];
+#endif
 
   // For model match, the last byte of the binding ID is XORed with the inverse of the modelId
   if (!InBindingMode && config.GetModelMatch())
@@ -602,6 +424,9 @@ void SetRFLinkRate(uint8_t index) // Set speed of RF link
   // InitialFreq has been set, so lets also reset the FHSS Idx and Nonce.
   FHSSsetCurrIndex(0);
   OtaNonce = 0;
+#ifdef USE_ENCRYPTION
+  OtaCrypto.onNonceReset();
+#endif
 
   OtaUpdateSerializers(newSwitchMode, ModParams->PayloadLength);
   MspSender.setMaxPackageIndex(ELRS_MSP_MAX_PACKAGES);
@@ -651,6 +476,10 @@ void ICACHE_RAM_ATTR HandlePrepareForTLM()
   // If TLM enabled and next packet is going to be telemetry, start listening to have a large receive window (time-wise)
   if (ExpressLRS_currTlmDenom != 1 && ((OtaNonce + 1) % ExpressLRS_currTlmDenom) == 0)
   {
+#ifdef USE_ENCRYPTION
+    tlmCryptoEpoch = OtaCrypto.getEpoch();
+    tlmCryptoNonce = OtaNonce;
+#endif
     Radio.RXnb();
     TelemetryRcvPhase = ttrpPreReceiveGap;
   }
@@ -833,19 +662,31 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
 #endif
   {
 #ifdef USE_ENCRYPTION
-    if (encryptionStateSend == ENCRYPTION_STATE_FULL)
+    // Sync packets stay unencrypted so an RX can always recover from them
+    if (otaPkt.std.type != PACKET_TYPE_SYNC && !InBindingMode)
     {
-      EncryptMsg( (uint8_t*)&otaPkt, (uint8_t*)&otaPkt );
+      OtaCrypto.apply((uint8_t *)&otaPkt, ExpressLRS_currAirRate_Modparams->PayloadLength, OTA_CRYPTO_UPLINK, OtaNonce);
     }
-  #endif
+#endif
 
     Radio.TXnb((uint8_t*)&otaPkt, ExpressLRS_currAirRate_Modparams->PayloadLength, transmittingRadio);
   }
 }
 
-void ICACHE_RAM_ATTR nonceAdvance()
+static inline void ICACHE_RAM_ATTR OtaNonceIncrement()
 {
   OtaNonce++;
+#ifdef USE_ENCRYPTION
+  if (OtaNonce == 0)
+  {
+    OtaCrypto.onNonceWrapped();
+  }
+#endif
+}
+
+void ICACHE_RAM_ATTR nonceAdvance()
+{
+  OtaNonceIncrement();
   if ((OtaNonce + 1) % ExpressLRS_currAirRate_Modparams->FHSShopInterval == 0)
   {
     ++FHSSptr;
@@ -886,7 +727,7 @@ void ICACHE_RAM_ATTR timerCallback()
 
   // Nonce advances on every timer tick
   if (!InBindingMode)
-    OtaNonce++;
+    OtaNonceIncrement();
 
   // If HandleTLM has started Receive mode, TLM packet reception should begin shortly
   // Skip transmitting on this slot
@@ -1216,6 +1057,9 @@ static void EnterBindingMode()
   // Binding uses a CRCInit=0, 50Hz, and InvertIQ
   OtaCrcInitializer = 0;
   OtaNonce = 0; // Lock the OtaNonce to prevent syncspam packets
+#ifdef USE_ENCRYPTION
+  OtaCrypto.onNonceReset();
+#endif
   InBindingMode = true; // Set binding mode before SetRFLinkRate() for correct IQ
 
   // Start attempting to bind
@@ -1619,6 +1463,15 @@ void setup()
     config.SetStorageProvider(&eeprom); // Pass pointer to the Config class for access to storage
     config.Load(); // Load the stored values from eeprom
 
+#ifdef USE_ENCRYPTION
+    {
+      static const uint8_t otaMasterKey[OTA_CRYPTO_KEY_SIZE] = {OTA_MASTER_KEY};
+      OtaCrypto.init(otaMasterKey);
+      // Saved before the radio starts, so this boot can never reuse a previous boot's keystream
+      OtaCrypto.setBootCount(config.NextCryptoBootCount());
+    }
+#endif
+
     Radio.currFreq = FHSSgetInitialFreq(); //set frequency first or an error will occur!!!
     #if defined(RADIO_SX127X)
     //Radio.currSyncWord = UID[3];
@@ -1652,10 +1505,6 @@ void setup()
       // Set the pkt rate, TLM ratio, and power from the stored eeprom values
       ChangeRadioParams();
 
-#ifdef USE_ENCRYPTION
-      // Should be a good time to do this, because BeginClearChannelAssessment also sets the radio to continuous recv
-      RandRSSI( (uint8_t *) &nonce_key, 24);
-#endif
   #if defined(Regulatory_Domain_EU_CE_2400)
       SetClearChannelAssessmentTime();
   #endif
@@ -1726,6 +1575,13 @@ void loop()
   }
 
   CheckReadyToSend();
+#ifdef USE_ENCRYPTION
+  // Only after many hours transmitting. Goes through the normal config commit path.
+  if (OtaCrypto.takeBootCountChanged())
+  {
+    config.SetCryptoBootCount(OtaCrypto.getEpoch().bootCount);
+  }
+#endif
   CheckConfigChangePending();
   DynamicPower_Update(now);
   VtxPitmodeSwitchUpdate();
@@ -1771,22 +1627,6 @@ void loop()
   }
 
   static bool mspTransferActive = false;
-
-#ifdef USE_ENCRYPTION
-  if ( (connectionState == connected) && (!MspSender.IsActive()) )
-  {
-    if (encryptionStateSend == ENCRYPTION_STATE_NONE)
-	{
-      InitCrypto();
-      encryptionStateSend = ENCRYPTION_STATE_PROPOSED;
-    }
-	  else if (encryptionStateSend == ENCRYPTION_STATE_PROPOSED )
-	  {
-        // MspSender.IsActive() will be true until our proposal msg is ack'ed
-        encryptionStateSend = ENCRYPTION_STATE_FULL;
-	  }
-  }
-#endif
 
   // only send msp data when binding is not active
   if (InBindingMode)

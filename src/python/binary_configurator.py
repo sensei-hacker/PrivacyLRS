@@ -6,13 +6,13 @@ import argparse
 import json
 from json import JSONEncoder
 import mmap
-import hashlib
 from enum import Enum
 import shutil
 
 import firmware
 from firmware import DeviceType, FirmwareOptions, RadioType, MCUType, TXType
 import melodyparser
+import phrase_kdf
 import UnifiedConfiguration
 import binary_flash
 from binary_flash import UploadMethod
@@ -79,7 +79,7 @@ def generateUID(phrase):
         uid = [0] * (6 - len(uid)) + uid
         uid = bytes(uid)
     else:
-        uid = hashlib.md5(("-DMY_BINDING_PHRASE=\""+phrase+"\"").encode()).digest()[0:6]
+        uid = phrase_kdf.derive_from_phrase(phrase)[0]
     return uid
 
 def patch_uid(mm, pos, args):
@@ -429,6 +429,13 @@ def main():
             with open(args.file.name, 'rb') as f_in:
                 with gzip.open('firmware.bin.gz', 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
+
+            # An ESP8285 RX can only be updated from its web UI with the .gz. Keep it with the input
+            # file, as the Configurator looks there for the file to give to the user. Not for a TX,
+            # whose web UI needs the .bin.
+            input_dir = os.path.dirname(os.path.abspath(args.file.name))
+            if options.deviceType == DeviceType.RX and args.rx_as_tx is None and input_dir != os.getcwd():
+                shutil.copy2('firmware.bin.gz', input_dir)
 
         if args.flash:
             args.target = config.get('firmware')

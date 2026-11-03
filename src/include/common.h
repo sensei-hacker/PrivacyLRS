@@ -15,13 +15,16 @@
 
 #endif // UNIT_TEST
 
-#ifdef USE_ENCRYPTION
-#include "encryption.h"
-#endif
-
 // Used to XOR with OtaCrcInitializer and macSeed to reduce compatibility with previous versions.
 // It should be incremented when the OTA packet structure is modified.
-#define OTA_VERSION_ID      3
+// The version a stock ExpressLRS build of this release would report
+#define OTA_VERSION_ID_STOCK 3
+#ifdef USE_ENCRYPTION
+// Encrypted links are not compatible with stock ExpressLRS, so make sure they never partly connect
+#define OTA_VERSION_ID      (OTA_VERSION_ID_STOCK ^ 0x50)
+#else
+#define OTA_VERSION_ID      OTA_VERSION_ID_STOCK
+#endif
 #define UID_LEN             6
 
 typedef enum : uint8_t

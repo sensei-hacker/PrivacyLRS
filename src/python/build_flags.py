@@ -3,12 +3,12 @@ from genericpath import exists
 import os
 from random import randint
 import sys
-import hashlib
 import fnmatch
 import time
 import re
 import melodyparser
 import elrs_helpers
+import phrase_kdf
 
 build_flags = env.get('BUILD_FLAGS', [])
 json_flags = {}
@@ -35,11 +35,28 @@ def dequote(str):
         return str[1:-1]
     return str
 
+KDF_MIN_PHRASE_LEN = 20
+checked_phrases = set()
+
+def derive_from_phrase(define):
+    '''Returns (uid, master_key) for a -DMY_BINDING_PHRASE define.'''
+    phrase = re.search(r"MY_BINDING_PHRASE\s*=\s*\"?(.*?)\"?\s*$", define).group(1)
+    if phrase not in checked_phrases:
+        checked_phrases.add(phrase)
+        if not phrase:
+            print_error("Binding phrase is empty")
+        if len(phrase) < KDF_MIN_PHRASE_LEN:
+            sys.stdout.write("\n\033[47;31m WARNING: binding phrase is only %d characters. It is the only secret protecting "
+                             "your link, so use at least %d characters, ideally 5 or more random words. \033[0m\n\n"
+                             % (len(phrase), KDF_MIN_PHRASE_LEN))
+            sys.stdout.flush()
+    return phrase_kdf.derive_from_phrase(phrase)
+
 def process_json_flag(define):
     parts = re.search(r"-D(.*)\s*=\s*(.*)$", define)
     if parts and define.startswith("-D"):
         if parts.group(1) == "MY_BINDING_PHRASE":
-            json_flags['uid'] = [x for x in hashlib.md5(define.encode()).digest()[0:6]]
+            json_flags['uid'] = list(derive_from_phrase(define)[0])
         if parts.group(1) == "HOME_WIFI_SSID":
             json_flags['wifi-ssid'] = dequote(parts.group(2))
         if parts.group(1) == "HOME_WIFI_PASSWORD":
@@ -71,15 +88,13 @@ def process_json_flag(define):
 def process_build_flag(define):
     if define.startswith("-D") or define.startswith("!-D"):
         if "MY_BINDING_PHRASE" in define:
-            bindingPhraseHash = hashlib.md5(define.encode()).digest()
-            UIDbytes = ",".join(list(map(str, bindingPhraseHash))[0:6])
-            define = "-DMY_UID=" + UIDbytes
+            uid, master_key = derive_from_phrase(define)
+            UIDbytes = ",".join(map(str, uid))
             sys.stdout.write("\u001b[32mUID bytes: " + UIDbytes + "\n")
-
-            stronghash=hashlib.sha256(define.encode()).hexdigest()
-            define = "-DUSE_ENCRYPTION=\"" + stronghash[0:32] + "\""
-            sys.stdout.write("\u001b[32mUSE_ENCRYPTION: " + stronghash[0:32] + "\n")
+            sys.stdout.write("\u001b[32mEncryption enabled\n")
             sys.stdout.flush()
+            build_flags.append("-DOTA_MASTER_KEY=" + ",".join(map(str, master_key)))
+            define = "-DUSE_ENCRYPTION"
         if "MY_STARTUP_MELODY=" in define:
             parsedMelody = melodyparser.parse(define.split('"')[1::2][0])
             define = "-DMY_STARTUP_MELODY_ARR=\"" + parsedMelody + "\""
@@ -152,9 +167,12 @@ condense_flags()
 
 if '-DRADIO_SX127X=1' in build_flags or '-DRADIO_LR1121=1' in build_flags:
     # disallow setting 2400s for 900
-    if fnmatch.filter(build_flags, '*-DRegulatory_Domain_ISM_2400') or \
-        fnmatch.filter(build_flags, '*-DRegulatory_Domain_EU_CE_2400'):
-        print_error('Regulatory_Domain 2400 not compatible with RADIO_SX127X/RADIO_LR1121')
+    # LR1121 is dual band and the Configurator also passes a 2400 domain for it. ISM_2400 is
+    # removed below (the 2.4GHz channels are fixed in FHSS.cpp), but LBT is SX1280 only
+    if '-DRADIO_SX127X=1' in build_flags and fnmatch.filter(build_flags, '*-DRegulatory_Domain_ISM_2400'):
+        print_error('Regulatory_Domain_ISM_2400 not compatible with RADIO_SX127X')
+    if fnmatch.filter(build_flags, '*-DRegulatory_Domain_EU_CE_2400'):
+        print_error('Regulatory_Domain_EU_CE_2400 (LBT) not compatible with RADIO_SX127X/RADIO_LR1121')
 
     # require a domain be set for 900
     if not fnmatch.filter(build_flags, '*-DRegulatory_Domain*'):
@@ -186,7 +204,8 @@ if fnmatch.filter(build_flags, '*Regulatory_Domain_ISM_2400*') and \
 
 env['OPTIONS_JSON'] = json_flags
 env['BUILD_FLAGS'] = build_flags
-sys.stdout.write("\nbuild flags: %s\n\n" % build_flags)
+# The key must stay out of build logs, as it can decrypt every recording of this link
+sys.stdout.write("\nbuild flags: %s\n\n" % [f for f in build_flags if not f.startswith("-DOTA_MASTER_KEY=")])
 
 if fnmatch.filter(build_flags, '*PLATFORM_ESP32*'):
     sys.stdout.write("\u001b[32mBuilding for ESP32 Platform\n")
