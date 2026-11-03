@@ -152,7 +152,7 @@ Tested on a RadioMaster Pocket (ESP32 TX) and a BETAFPV 2.4GHz AIO RX (ESP8285),
 | Reboot the radio, leave the drone on | Passed |
 | Run 100 Full and 333 Full | Passed |
 
-With `OtaSyncGuard` (commit `14044457`), also reported by the person who flashed the build. The number of attempts wasn't recorded.
+With `OtaSyncGuard` (commit `14044457`), on the same RadioMaster Pocket and BETAFPV 2.4GHz AIO RX at 10 mW, also reported by the person who flashed the build. The number of attempts wasn't recorded.
 
 | Test | Result |
 |---|---|
