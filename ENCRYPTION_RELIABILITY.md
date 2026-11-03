@@ -141,7 +141,7 @@ The tests cover bursts of up to 100,000 lost packets, 50% random loss, RX and TX
 
 ### Hardware test results
 
-Tested on a RadioMaster Pocket (ESP32 TX) and a BETAFPV 2.4GHz AIO RX (ESP8285), reported by the person who flashed them. The packet rates used weren't recorded. These tests were run before `OtaSyncGuard` was added, so they need repeating with it.
+Tested on a RadioMaster Pocket (ESP32 TX) and a BETAFPV 2.4GHz AIO RX (ESP8285), reported by the person who flashed them. The packet rates used weren't recorded. The tests in this first table were run before `OtaSyncGuard` was added.
 
 | Test | Result |
 |---|---|
@@ -152,17 +152,26 @@ Tested on a RadioMaster Pocket (ESP32 TX) and a BETAFPV 2.4GHz AIO RX (ESP8285),
 | Reboot the radio, leave the drone on | Passed |
 | Run 100 Full and 333 Full | Passed |
 
+With `OtaSyncGuard` (commit `14044457`), also reported by the person who flashed the build. The number of attempts wasn't recorded.
+
+| Test | Result |
+|---|---|
+| Reconnect at LQ 35-40% (about 60% loss) | Passed |
+| Change packet rate at LQ 35-40% | Passed |
+| Reconnect at 50Hz | Passed, in roughly 1-2 s by eye. Not yet compared with stock |
+
 ### Tests still needed
 
 | Test | Expected result |
 |---|---|
-| Repeat the hardware tests above with `OtaSyncGuard`, especially changing packet rate in Lua, with a weak signal as well as a strong one | Same results. The RX now needs 2 of the TX's sync packets to change rate while connected |
+| Repeat the first table's tests with `OtaSyncGuard`, including a short flight | Same results |
 | Time reconnects against stock 3.5.3, especially at slow rates such as 50Hz | Close to stock, despite needing two syncs |
-| Telemetry off | Link works |
 | 100 cold boots and 100 rate changes | No permanent link loss |
 | Several hours of accumulated running | No drops or reboots |
 | Measure decrypt time on the ESP8285 | Comfortably inside the 200 µs budget (`PACKET_TO_TOCK_SLACK`) |
 | Fly at the edge of range, using an aircraft you can afford to lose | Same range and recovery as stock |
+
+Telemetry off won't be tested, because private telemetry is one of the main reasons to use this firmware. The firmware doesn't block that setting, so a link with telemetry off remains untested on hardware.
 
 ## Upgrading
 
